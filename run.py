@@ -8,6 +8,7 @@ import tarfile
 import urllib.request
 import gzip
 import json
+import re, html
 from bs4 import BeautifulSoup
 from unicodedata import normalize
 
@@ -18,56 +19,57 @@ OUT_DIR  = "data/jsonl"   # save .jsonl.gz
 os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# ---------- Βοηθοί κειμένου ----------
-import re, html
-from unicodedata import normalize
-
+# ---------- Text cleaning & extraction ----------
 def clean(s: str) -> str:
     if s is None:
         return ""
-    s = html.unescape(s)  # Αντιμετωπίζει HTML entities όπως &#x02013; (en dash)
-    s = normalize("NFC", s)  # Κανονικοποιεί το unicode
+    s = html.unescape(s)  # Handling HTML entities  like &#x02013; (en dash)
+    s = normalize("NFC", s)  # Normalize το unicode
 
-    # Συμπίεση whitespace (αφαιρεί όλα τα επιπλέον κενά ή νέα γραμμές)
+    # Compress whitespace (spaces, tabs, newlines) to single space
     s = re.sub(r"[ \t\r\f\v]+", " ", s).strip()
 
-    # 1) Αφαιρεί κενά πριν από στίξη (π.χ. gene , name → gene, name)
+    # Remove spaces before punctuation (e.g. gene , name → gene, name)
     s = re.sub(r"\s+([,.;:!?%])", r"\1", s)
 
-    # 2) Μην αφήνεις κενό πριν από κλείσιμο παρενθέσεων/εισαγωγικών κλπ
+    # Don't leave space before closing brackets/quotes
     s = re.sub(r"\s+([)\]\}»”’])", r"\1", s)
 
-    # 3) Μην αφήνεις κενό αμέσως μετά από άνοιγμα παρενθέσεων/εισαγωγικών/αγκύλων
+    # Don't leave space after opening brackets/quotes
     s = re.sub(r"([(\[\{«“‘])\s+", r"\1", s)
 
-    # 4) Αριθμοί με κόμμα (π.χ. 5,400) να μην σπάνε σε 5, 400
-    #    (απλώς διασφαλίζουμε ότι δεν υπάρχει κενό γύρω από κόμμα όταν είναι μεταξύ ψηφίων)
+    # Digit grouping commas: "1, 000" → "1,000"
+    # Only if between digits (to avoid messing with lists)
     s = re.sub(r"(?<=\d)\s*,\s*(?=\d)", ",", s)
 
-    # 5) Ενδο-λέξης παύλα ή en dash να παραμένει κολλητή (nef-par, nef–par)
-    s = re.sub(r"(?<=\w)\s*([\-–])\s*(?=\w)", r"\1", s)
-    #    και εύρος αριθμών με en dash χωρίς κενά (π.χ. 5 – 10 → 5–10)
+    # Remove spaces around hyphens in words (e.g. "state - of - the - art" → "state-of-the-art")
+    # Do not touch cases like "17- and"
+    s = re.sub(r"(?<=[A-Za-z])\s*-\s*(?=[A-Za-z])", "-", s)
+
+    # Range of numbers with en dash: "2000 – 2021" → "2000–2021"
     s = re.sub(r"(?<=\d)\s*–\s*(?=\d)", "–", s)
 
-    # 6) Όχι κενό γύρω από '=' (x = 5 → x=5)
+    # No spaces around '=' (x = 5 → x=5)
     s = re.sub(r"\s*=\s*", "=", s)
 
-    # 7) Τελική καθαριότητα διπλών κενών
+    # whitespace cleanup again
     s = re.sub(r"\s{2,}", " ", s).strip()
 
     return s
 
 
 
-
 def text_from(node) -> str:
-    # ΧΡΗΣΙΜΟ: separator=" " για να κρατάει το κενό σε inline tags,
-    # το clean() μετά διορθώνει τα κενά πριν από στίξη
+    # Extract clean text from a BeautifulSoup node
     return clean(node.get_text(" ", strip=True))
 
 
 
 def in_boundary_without_tables(tag, boundary_name: str) -> bool:
+    """ Check if `tag` is within a boundary (e.g. "body", "abstract") 
+        but not inside tables or table-wraps.
+        If boundary_name is None or empty, just check not in table/table-wrap.
+    """
     p = getattr(tag, "parent", None)
     boundary_name = (boundary_name or "").lower()
     while p is not None:
@@ -86,7 +88,7 @@ def in_boundary_without_tables(tag, boundary_name: str) -> bool:
 
 # ---------- JATS pickers ----------
 def extract_text(soup):
-    """Μόνο παράγραφοι κάτω από <body>, χωρίς tables (boundary-aware)."""
+    """Only paragraphs under <body>, no tables (boundary-aware)."""
     body = soup.find("body")
     if not body:
         return ""
@@ -99,10 +101,8 @@ def extract_text(soup):
     return "\n\n".join(paras)
 
 
-
-# --- ΔΙΟΡΘΩΣΗ extract_abstract ---
 def extract_abstract(art):
-    """Μόνο οι παράγραφοι του επιλεγμένου *κανονικού* abstract."""
+    """Only normal abstracts, no graphical/teaser/etc (boundary-aware)."""
     def pick_normal_abstract(art):
         BAD = {"graphical","teaser","author-summary","editor-summary","lay-summary"}
         if not art: return None
@@ -117,10 +117,9 @@ def extract_abstract(art):
     abs_el = pick_normal_abstract(art)
     if not abs_el:
         return ""
-
     paras = []
     for p in abs_el.find_all("p"):
-        # νέο boundary-aware check
+        # new boundary-aware check
         if in_boundary_without_tables(p, "abstract"):
             t = text_from(p)
             if t:
@@ -130,7 +129,7 @@ def extract_abstract(art):
 
 
 def extract_authors(art):
-    """Authors ως 'Given Surname' strings, με τη σειρά."""
+    """Authors with format "Given Names Surname" or "Collaboration Name"."""
     out, seen = [], set()
     if not art: return out
     for c in art.select("contrib-group > contrib[contrib-type=author]"):
@@ -173,7 +172,7 @@ def extract_metadata(soup):
     atitle = art.select_one("title-group > article-title") if art else None
     jtitle = jmeta.select_one("journal-title-group > journal-title") if jmeta else None
 
-    # epub σε ISO-ish YYYY[-MM[-DD]]
+    # epub YYYY[-MM[-DD]]
     epub = None
     if art:
         for pd in art.find_all("pub-date"):
@@ -214,8 +213,8 @@ def tar_to_jsonl(tar_path: str) -> str:
     """ Convert a .tar.gz of JATS XML files to a single .jsonl.gz file.
     parsed = number of XML files parsed
     kept   = number of JSON records written
-    skipped= number of XML files skipped (no pmc or errors)"""
-
+    skipped= number of XML files skipped (no pmc or errors)
+    """
     base   = os.path.basename(tar_path)
     prefix = os.path.splitext(os.path.splitext(base)[0])[0]  # drop .tar(.gz)
     out_path = os.path.join(OUT_DIR, f"{prefix}.jsonl.gz") # e.g. data/jsonl/oa_comm_xml.PMC012xxxxxx.baseline.2025-06-26.jsonl.gz
@@ -278,7 +277,6 @@ def main():
         tar_path = download_tar(arg) 
 
     tar_to_jsonl(tar_path)
-
 
 
 
