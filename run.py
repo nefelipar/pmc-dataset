@@ -15,9 +15,11 @@ from unicodedata import normalize
 BASE_URL = "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_bulk/oa_comm/xml/"
 RAW_DIR  = "data/tar"     # save .tar.gz
 OUT_DIR  = "data/jsonl"   # save .jsonl.gz
+LOG_DIR  = "data/logs"    # logs (e.g., missing abstracts)
 
 os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(OUT_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
 
 # ---------- Text cleaning & extraction ----------
 def clean(s: str) -> str:
@@ -218,6 +220,7 @@ def tar_to_jsonl(tar_path: str) -> str:
     base   = os.path.basename(tar_path)
     prefix = os.path.splitext(os.path.splitext(base)[0])[0]  # drop .tar(.gz)
     out_path = os.path.join(OUT_DIR, f"{prefix}.jsonl.gz") # e.g. data/jsonl/oa_comm_xml.PMC012xxxxxx.baseline.2025-06-26.jsonl.gz
+    log_path = os.path.join(LOG_DIR, f"{prefix}.log")
 
     parsed = kept = skipped = 0
     with tarfile.open(tar_path, "r:gz") as tf, gzip.open(out_path, "wt", encoding="utf-8") as fout:
@@ -234,6 +237,15 @@ def tar_to_jsonl(tar_path: str) -> str:
                 if rec is None:
                     skipped += 1
                     continue
+                # Log PMC IDs that lack an abstract
+                if not (rec.get("abstract") or "").strip():
+                    try:
+                        with open(log_path, "a", encoding="utf-8") as lf:
+                            title = (rec.get("metadata", {}).get("article_title") or "").replace("\n", " ")
+                            lf.write(f"{rec.get('pmc','')}\t{title}\n")
+                    except Exception:
+                        # Logging must not break the pipeline; ignore log I/O errors
+                        pass
                 fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 kept += 1
             except Exception:
