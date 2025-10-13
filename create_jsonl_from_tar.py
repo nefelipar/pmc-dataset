@@ -88,9 +88,9 @@ def count_words(text: str) -> int:
 
 
 
-def in_boundary_without_tables(tag, boundary_name: str) -> bool:
+def in_boundary_without_forbidden(tag, boundary_name: str) -> bool:
     """ Check if `tag` is within a boundary (e.g. "body", "abstract") 
-        but not inside tables or table-wraps.
+        but not inside tables, figures/images, captions, or table-wraps.
         If boundary_name is None or empty, just check not in table/table-wrap.
     """
     p = getattr(tag, "parent", None)
@@ -100,7 +100,7 @@ def in_boundary_without_tables(tag, boundary_name: str) -> bool:
         if not name:
             p = getattr(p, "parent", None)
             continue
-        if name in {"table", "table-wrap"}:
+        if name in {"table", "table-wrap", "fig", "figure", "graphic", "inline-graphic", "media", "caption"}:
             return False
         if name == boundary_name:
             return True
@@ -108,16 +108,60 @@ def in_boundary_without_tables(tag, boundary_name: str) -> bool:
     return False
 
 
+def is_in_ignored_section(tag) -> bool:
+    """Detect if a tag is inside sections we want to exclude from body text
+    (acknowledgments, references, bibliography, appendix, supplementary, etc.).
+    """
+    IGNORE_SECTION_TITLES = re.compile(r"^(acknowledg(e)?ments?|references?|bibliograph(y|ies)|appendix|supplementar(y|ies|y materials)|supplemental|conflict(s)? of interest|author contribution(s)?|funding)$", re.IGNORECASE)
+    p = getattr(tag, "parent", None)
+    while p is not None:
+        name = (getattr(p, "name", None) or "").lower()
+        if name in {"ack", "ref-list"}:  # explicit back-matter containers
+            return True
+        if name == "sec":
+            # Look for a title child to decide
+            t = p.find("title")
+            if t:
+                title_text = clean(t.get_text(" ", strip=True))
+                if title_text and IGNORE_SECTION_TITLES.match(title_text):
+                    return True
+        p = getattr(p, "parent", None)
+    return False
+
+
+def replace_math_with_placeholder(soup_or_tag):
+    """Replace all math nodes with the literal placeholder [MATH].
+    Covers inline and display math in common JATS forms.
+    """
+    math_like = []
+    # Collect various math representations
+    math_like.extend(soup_or_tag.find_all(["inline-formula", "disp-formula", "tex-math"]))
+    # Namespaced MathML can appear as mml:math or math
+    math_like.extend([t for t in soup_or_tag.find_all(True) if (t.name or "").lower().endswith(":math") or (t.name or "").lower() == "math"])
+    for m in math_like:
+        m.replace_with(soup_or_tag.new_string("[MATH]"))
+
+
+def remove_images_and_captions(soup_or_tag):
+    """Remove figures/images and their captions completely from the tree."""
+    for tname in ["fig", "figure", "graphic", "inline-graphic", "media", "caption"]:
+        for el in soup_or_tag.find_all(tname):
+            el.decompose()
+
+
 
 # ---------- JATS pickers ----------
 def extract_text(soup):
-    """Only paragraphs under <body>, no tables (boundary-aware)."""
+    """Only paragraphs under <body>, no tables/images/captions; math → [MATH]."""
     body = soup.find("body")
     if not body:
         return ""
+    # First, sanitize structure inside body
+    remove_images_and_captions(body)
+    replace_math_with_placeholder(body)
     paras = []
     for p in body.find_all("p"):
-        if in_boundary_without_tables(p, "body"):
+        if in_boundary_without_forbidden(p, "body") and not is_in_ignored_section(p):
             t = text_from(p)
             if t:
                 paras.append(t)
@@ -125,7 +169,7 @@ def extract_text(soup):
 
 
 def extract_abstract(art):
-    """Only normal abstracts, no graphical/teaser/etc (boundary-aware)."""
+    """Only normal abstracts, no graphical/teaser/etc; math → [MATH]; no tables/images."""
     def pick_normal_abstract(art):
         BAD = {"graphical","teaser","author-summary","editor-summary","lay-summary"}
         if not art: return None
@@ -140,10 +184,13 @@ def extract_abstract(art):
     abs_el = pick_normal_abstract(art)
     if not abs_el:
         return ""
+    # sanitize abstract structure
+    remove_images_and_captions(abs_el)
+    replace_math_with_placeholder(abs_el)
     paras = []
     for p in abs_el.find_all("p"):
-        # new boundary-aware check
-        if in_boundary_without_tables(p, "abstract"):
+        # boundary-aware check
+        if in_boundary_without_forbidden(p, "abstract"):
             t = text_from(p)
             if t:
                 paras.append(t)
@@ -221,11 +268,12 @@ def extract_metadata(soup):
 
 
 def build_record(xml_bytes: bytes, count_error_log_path: str = None):
-    """Makes a JSON line for JSONL: {pmc, text, abstract, metadata{...}}"""
+    """Makes a JSON line for JSONL: {abstract, text, metadata{...}}"""
     soup = BeautifulSoup(xml_bytes, "lxml-xml")
     pmc, metadata = extract_metadata(soup)
-    if not pmc:
-        return None  # we need pmc for primary ID
+    # Keep record even if pmc is missing; attach if available
+    if pmc:
+        metadata["pmc"] = pmc
     abstract = extract_abstract(get_article_meta(soup))
     text = extract_text(soup)
     # Add word counts into metadata; log failures per field
@@ -255,7 +303,7 @@ def build_record(xml_bytes: bytes, count_error_log_path: str = None):
                     lf.write(f"{pmc}\ttext_count\t{type(e).__name__}: {str(e).replace('\n',' ')}\n")
             except Exception:
                 pass
-    return {"pmc": pmc, "text": text, "abstract": abstract, "metadata": metadata}
+    return {"abstract": abstract, "text": text, "metadata": metadata}
 
 
 
@@ -287,15 +335,12 @@ def tar_to_jsonl(tar_path: str) -> str:
             parsed += 1
             try:
                 rec = build_record(xml_bytes, count_error_log_path=count_error_log_path)
-                if rec is None:
-                    skipped += 1
-                    continue
                 # Log PMC IDs that lack an abstract
                 if not (rec.get("abstract") or "").strip():
                     try:
                         with open(log_path, "a", encoding="utf-8") as lf:
                             title = (rec.get("metadata", {}).get("article_title") or "").replace("\n", " ")
-                            lf.write(f"{rec.get('pmc','')}\t{title}\n")
+                            lf.write(f"{rec.get('metadata',{}).get('pmc','')}\t{title}\n")
                     except Exception:
                         # Logging must not break the pipeline; ignore log I/O errors
                         pass
