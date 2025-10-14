@@ -9,7 +9,7 @@ import urllib.request
 import gzip
 import json
 import re, html
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from unicodedata import normalize
 
 BASE_URL = "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_bulk/oa_comm/xml/"
@@ -27,6 +27,59 @@ def clean(s: str) -> str:
         return ""
     s = html.unescape(s)  # Handling HTML entities  like &#x02013; (en dash)
     s = normalize("NFC", s)  # Normalize το unicode
+
+    # Remove parenthetical references to figures/tables and citations, replacing
+    # the entire parenthesis with "" per requirement, e.g.:
+    # (Figure 1a) → "", (Table 2) → "", (Bozdech et al. 2003) → "",
+    # (see Fig. 3; Smith 2004) → ""
+    def _paren_replacer(match: re.Match) -> str:
+        inner = match.group(1)
+        inner_lc = inner.lower()
+        # figure/table hints
+        if re.search(r"\b(fig(?:\.|ures?)?|figure|figs?|table|tables)\b", inner_lc):
+            return ""
+        # citation with 'et al.' and year
+        if re.search(r"\bet\s+al\.?\b", inner_lc) and re.search(r"\b(19|20)\d{2}[a-z]?\b", inner):
+            return ""
+        # surname + year pattern (optionally two surnames joined by and/&)
+        if re.search(r"\b[A-Z][A-Za-z-]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z-]+)?\s+(?:\d{4}[a-z]?)\b", inner):
+            return ""
+        # multiple years separated by ; or , typical for grouped citations
+        if re.search(r"\b(19|20)\d{2}\b", inner) and (";" in inner or "," in inner):
+            return ""
+        return match.group(0)
+
+    # Replace non-nested parentheses of the above forms
+    s = re.sub(r"\(([^()]*)\)", _paren_replacer, s)
+
+    # Also remove figure/table references even when not in parentheses
+    # e.g., "see Figure 1a", "Fig. 2B", "Tables 3–4"
+    figtab_pattern = re.compile(
+        r"\b(?:see(?:\s+also)?\s+)?(?:fig(?:\.|s\.?|ures?)|figure|figs?|table|tables)\s*"
+        r"(?:"  # at least one token like 1, 1A, S1, II, 2B, 1A–C
+        r"[A-Za-z]?\s*(?:[IVX]+|\d+)[A-Za-z]*"  # allow zero or more letters after number
+        r"(?:\s*[–-]\s*[A-Za-z]?\s*(?:[IVX]+|\d+)[A-Za-z]*)?"
+        r")"
+        r"(?:\s*(?:,|;|and)\s*"  # optionally more tokens joined by connectors
+        r"(?:[A-Za-z]?\s*(?:[IVX]+|\d+)[A-Za-z]*"
+        r"(?:\s*[–-]\s*[A-Za-z]?\s*(?:[IVX]+|\d+)[A-Za-z]*)?" 
+        r"))*"
+        r"[A-Za-z]{0,2}",  # swallow any trailing panel letters glued to </xref>
+        flags=re.IGNORECASE,
+    )
+    s = figtab_pattern.sub(" ", s)
+
+    # Remove inline author-year style citations not in parentheses
+    # e.g., "Bozdech et al. 2003", "Smith and Doe 2014", "Smith 2014a", "Smith et al., 2003"
+    author_year_pattern = re.compile(
+        r"\b"                                 # start at word boundary
+        r"[A-Z][A-Za-z-]+"                     # Surname
+        r"(?:\s+(?:and|&)\s+[A-Z][A-Za-z-]+|\s+et\s+al\.?)*"  # and/& second or et al.
+        r",?\s+"                              # optional comma then space
+        r"\(?\d{4}[a-z]?\)?"                 # year with optional letter and parentheses
+        r"\b"
+    )
+    s = author_year_pattern.sub(" ", s)
 
     # Compress whitespace (spaces, tabs, newlines) to single space
     s = re.sub(r"[ \t\r\f\v]+", " ", s).strip()
@@ -149,6 +202,24 @@ def remove_images_and_captions(soup_or_tag):
             el.decompose()
 
 
+def remove_figure_table_xrefs_and_glued(soup_or_tag):
+    """Remove <xref ref-type="fig|figure|table">…</xref> and any glued panel letters right after it.
+    Example: <xref ref-type="fig">Figure 1</xref>F → remove entire xref content and the trailing 'F'.
+    Only removes the trailing letters if they are immediately adjacent (no leading space).
+    """
+    for xr in soup_or_tag.find_all("xref"):
+        rt = (xr.get("ref-type") or "").lower()
+        if rt in {"fig", "figure", "table", "tables"}:
+            ns = xr.next_sibling
+            if isinstance(ns, NavigableString):
+                s = str(ns)
+                # Remove 1–2 leading letters (panel labels), optionally followed by range like A–C
+                m = re.match(r"^([A-Za-z]{1,2}(?:\s*[–-]\s*[A-Za-z]{1,2})?)", s)
+                if m:
+                    ns.replace_with(s[len(m.group(1)):])
+            xr.decompose()
+
+
 
 # ---------- JATS pickers ----------
 def extract_text(soup):
@@ -158,6 +229,7 @@ def extract_text(soup):
         return ""
     # First, sanitize structure inside body
     remove_images_and_captions(body)
+    remove_figure_table_xrefs_and_glued(body)
     replace_math_with_placeholder(body)
     paras = []
     for p in body.find_all("p"):
@@ -186,6 +258,7 @@ def extract_abstract(art):
         return ""
     # sanitize abstract structure
     remove_images_and_captions(abs_el)
+    remove_figure_table_xrefs_and_glued(abs_el)
     replace_math_with_placeholder(abs_el)
     paras = []
     for p in abs_el.find_all("p"):
