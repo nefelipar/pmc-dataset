@@ -21,6 +21,12 @@ os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
+# Section titles we should skip entirely (acknowledgments, references, etc.)
+IGNORE_SECTION_TITLES_RE = re.compile(
+    r"^(acknowledg(e)?ments?|references?|bibliograph(y|ies)|appendix|supplementar(y|ies|y materials)|supplemental|conflict(s)? of interest|author contribution(s)?|funding)$",
+    re.IGNORECASE,
+)
+
 # ---------- Text cleaning & extraction ----------
 def clean(s: str) -> str:
     if s is None:
@@ -165,7 +171,6 @@ def is_in_ignored_section(tag) -> bool:
     """Detect if a tag is inside sections we want to exclude from body text
     (acknowledgments, references, bibliography, appendix, supplementary, etc.).
     """
-    IGNORE_SECTION_TITLES = re.compile(r"^(acknowledg(e)?ments?|references?|bibliograph(y|ies)|appendix|supplementar(y|ies|y materials)|supplemental|conflict(s)? of interest|author contribution(s)?|funding)$", re.IGNORECASE)
     p = getattr(tag, "parent", None)
     while p is not None:
         name = (getattr(p, "name", None) or "").lower()
@@ -176,7 +181,7 @@ def is_in_ignored_section(tag) -> bool:
             t = p.find("title")
             if t:
                 title_text = clean(t.get_text(" ", strip=True))
-                if title_text and IGNORE_SECTION_TITLES.match(title_text):
+                if title_text and IGNORE_SECTION_TITLES_RE.match(title_text):
                     return True
         p = getattr(p, "parent", None)
     return False
@@ -231,13 +236,61 @@ def extract_text(soup):
     remove_images_and_captions(body)
     remove_figure_table_xrefs_and_glued(body)
     replace_math_with_placeholder(body)
-    paras = []
-    for p in body.find_all("p"):
+    blocks = []
+
+    def append_paragraph(p):
         if in_boundary_without_forbidden(p, "body") and not is_in_ignored_section(p):
             t = text_from(p)
             if t:
-                paras.append(t)
-    return "\n\n".join(paras)
+                blocks.append(t)
+
+    def should_skip_section(sec):
+        title_el = sec.find("title", recursive=False)
+        if not title_el:
+            return False
+        title_text = clean(title_el.get_text(" ", strip=True))
+        return bool(title_text and IGNORE_SECTION_TITLES_RE.match(title_text))
+
+    def add_heading(title: str, level: int):
+        if not title:
+            return
+        level = max(1, min(level, 6))
+        blocks.append(f"{'#' * level} {title}")
+
+    def traverse_section(sec, level: int):
+        if should_skip_section(sec):
+            return
+        title_el = sec.find("title", recursive=False)
+        title = clean(title_el.get_text(" ", strip=True)) if title_el else ""
+        if title:
+            add_heading(title, level)
+        for child in sec.children:
+            if isinstance(child, NavigableString):
+                continue
+            name = (child.name or "").lower()
+            if name == "title":
+                continue
+            if name == "sec":
+                traverse_section(child, level + 1)
+            else:
+                for p in child.find_all("p"):
+                    if p.find_parent("sec") is sec:
+                        append_paragraph(p)
+
+    for child in body.children:
+        if isinstance(child, NavigableString):
+            continue
+        name = (child.name or "").lower()
+        if name == "sec":
+            traverse_section(child, 1)
+        elif name == "p":
+            append_paragraph(child)
+        else:
+            for p in child.find_all("p"):
+                if p.find_parent("body") is body:
+                    append_paragraph(p)
+
+    return "\n\n".join(blocks)
 
 
 def extract_abstract(art):
