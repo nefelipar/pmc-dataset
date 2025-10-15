@@ -21,18 +21,14 @@ os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# Section titles we should skip entirely (acknowledgments, references, etc.)
-IGNORE_SECTION_TITLES_RE = re.compile(
-    r"^(acknowledg(e)?ments?|references?|bibliograph(y|ies)|appendix|supplementar(y|ies|y materials)|supplemental|conflict(s)? of interest|author contribution(s)?|funding)$",
-    re.IGNORECASE,
-)
 
 # ---------- Text cleaning & extraction ----------
 def clean(s: str) -> str:
     if s is None:
         return ""
-    s = html.unescape(s)  # Handling HTML entities  like &#x02013; (en dash)
-    s = normalize("NFC", s)  # Normalize το unicode
+    s = html.unescape(s)  # Handling HTML entities  like &#x02013;
+    s = normalize("NFC", s)  # Normalize to unicode
+
 
     # Remove parenthetical references to figures/tables and citations, replacing
     # the entire parenthesis with "" per requirement, e.g.:
@@ -119,10 +115,10 @@ def clean(s: str) -> str:
     return s
 
 
+
 def text_from(node) -> str:
     # Extract clean text from a BeautifulSoup node
     return clean(node.get_text(" ", strip=True))
-
 
 
 def _word_count_with_nltk(text: str):
@@ -171,6 +167,7 @@ def is_in_ignored_section(tag) -> bool:
     """Detect if a tag is inside sections we want to exclude from body text
     (acknowledgments, references, bibliography, appendix, supplementary, etc.).
     """
+    IGNORE_SECTION_TITLES = re.compile(r"^(acknowledg(e)?ments?|references?|bibliograph(y|ies)|appendix|supplementar(y|ies|y materia(l|ls))|supplemental|conflict(s)? of interest|author contribution(s)?|funding)$", re.IGNORECASE)
     p = getattr(tag, "parent", None)
     while p is not None:
         name = (getattr(p, "name", None) or "").lower()
@@ -181,23 +178,23 @@ def is_in_ignored_section(tag) -> bool:
             t = p.find("title")
             if t:
                 title_text = clean(t.get_text(" ", strip=True))
-                if title_text and IGNORE_SECTION_TITLES_RE.match(title_text):
+                if title_text and IGNORE_SECTION_TITLES.match(title_text):
                     return True
         p = getattr(p, "parent", None)
     return False
 
 
-def replace_math_with_placeholder(soup_or_tag):
-    """Replace all math nodes with the literal placeholder [MATH].
-    Covers inline and display math in common JATS forms.
-    """
-    math_like = []
-    # Collect various math representations
-    math_like.extend(soup_or_tag.find_all(["inline-formula", "disp-formula", "tex-math"]))
-    # Namespaced MathML can appear as mml:math or math
-    math_like.extend([t for t in soup_or_tag.find_all(True) if (t.name or "").lower().endswith(":math") or (t.name or "").lower() == "math"])
-    for m in math_like:
-        m.replace_with(soup_or_tag.new_string("[MATH]"))
+# def replace_math_with_placeholder(soup_or_tag):
+#     """Replace all math nodes with the literal placeholder [MATH].
+#     Covers inline and display math in common JATS forms.
+#     """
+#     math_like = []
+#     # Collect various math representations
+#     math_like.extend(soup_or_tag.find_all(["inline-formula", "disp-formula", "tex-math"]))
+#     # Namespaced MathML can appear as mml:math or math
+#     math_like.extend([t for t in soup_or_tag.find_all(True) if (t.name or "").lower().endswith(":math") or (t.name or "").lower() == "math"])
+#     for m in math_like:
+#         m.replace_with(soup_or_tag.new_string("[MATH]"))
 
 
 def remove_images_and_captions(soup_or_tag):
@@ -227,70 +224,61 @@ def remove_figure_table_xrefs_and_glued(soup_or_tag):
 
 
 # ---------- JATS pickers ----------
-def extract_text(soup):
-    """Only paragraphs under <body>, no tables/images/captions; math → [MATH]."""
+def _process_section_markdown(section_tag, level):
+    """
+    Recursive helper function to process a section (<sec>) and its children.
+    Returns a list of Markdown-formatted text blocks.
+    """
+    content_blocks = []
+    # Process direct children to maintain order
+    for child in section_tag.children:
+        if isinstance(child, NavigableString):
+            continue  # Ignore strings that are just whitespace between tags
+
+        tag_name = (child.name or "").lower()
+        
+        # Filter out unwanted sections before processing them
+        if is_in_ignored_section(child):
+            continue
+
+        if tag_name == 'title':
+            title_text = text_from(child)
+            if title_text:
+                # Use the level to set the Markdown hashes (e.g., #, ##, ###)
+                content_blocks.append(f"{'#' * level} {title_text}")
+
+        elif tag_name == 'p':
+            if in_boundary_without_forbidden(child, "body"):
+                p_text = text_from(child)
+                if p_text:
+                    content_blocks.append(p_text)
+
+        elif tag_name == 'sec':
+            # Recursive call for the subsection, increasing the hierarchy level
+            content_blocks.extend(_process_section_markdown(child, level + 1))
+
+    return content_blocks
+
+
+def extract_body_with_markdown(soup):
+    """
+    Extracts the main body of the article, preserving section titles and subtitles
+    and formatting them as Markdown, starting from Level 1 (#).
+    """
     body = soup.find("body")
     if not body:
         return ""
-    # First, sanitize structure inside body
+        
+    # First, sanitize the structure within the body
     remove_images_and_captions(body)
     remove_figure_table_xrefs_and_glued(body)
-    replace_math_with_placeholder(body)
-    blocks = []
+    
+    # Start the recursive processing from the body.
+    # Main sections will start with level 0 (#).
+    all_blocks = _process_section_markdown(body, 0)
+    
+    return "\n\n".join(all_blocks)
 
-    def append_paragraph(p):
-        if in_boundary_without_forbidden(p, "body") and not is_in_ignored_section(p):
-            t = text_from(p)
-            if t:
-                blocks.append(t)
-
-    def should_skip_section(sec):
-        title_el = sec.find("title", recursive=False)
-        if not title_el:
-            return False
-        title_text = clean(title_el.get_text(" ", strip=True))
-        return bool(title_text and IGNORE_SECTION_TITLES_RE.match(title_text))
-
-    def add_heading(title: str, level: int):
-        if not title:
-            return
-        level = max(1, min(level, 6))
-        blocks.append(f"{'#' * level} {title}")
-
-    def traverse_section(sec, level: int):
-        if should_skip_section(sec):
-            return
-        title_el = sec.find("title", recursive=False)
-        title = clean(title_el.get_text(" ", strip=True)) if title_el else ""
-        if title:
-            add_heading(title, level)
-        for child in sec.children:
-            if isinstance(child, NavigableString):
-                continue
-            name = (child.name or "").lower()
-            if name == "title":
-                continue
-            if name == "sec":
-                traverse_section(child, level + 1)
-            else:
-                for p in child.find_all("p"):
-                    if p.find_parent("sec") is sec:
-                        append_paragraph(p)
-
-    for child in body.children:
-        if isinstance(child, NavigableString):
-            continue
-        name = (child.name or "").lower()
-        if name == "sec":
-            traverse_section(child, 1)
-        elif name == "p":
-            append_paragraph(child)
-        else:
-            for p in child.find_all("p"):
-                if p.find_parent("body") is body:
-                    append_paragraph(p)
-
-    return "\n\n".join(blocks)
 
 
 def extract_abstract(art):
@@ -312,7 +300,7 @@ def extract_abstract(art):
     # sanitize abstract structure
     remove_images_and_captions(abs_el)
     remove_figure_table_xrefs_and_glued(abs_el)
-    replace_math_with_placeholder(abs_el)
+    # replace_math_with_placeholder(abs_el)
     paras = []
     for p in abs_el.find_all("p"):
         # boundary-aware check
@@ -394,15 +382,25 @@ def extract_metadata(soup):
 
 
 def build_record(xml_bytes: bytes, count_error_log_path: str = None):
-    """Makes a JSON line for JSONL: {abstract, text, metadata{...}}"""
+    """
+    Creates a JSON record where:
+    - "abstract": contains the abstract in plain text.
+    - "text": contains ONLY the main body with its titles in Markdown.
+    - "metadata": contains all metadata.
+    """
     soup = BeautifulSoup(xml_bytes, "lxml-xml")
     pmc, metadata = extract_metadata(soup)
-    # Keep record even if pmc is missing; attach if available
+
     if pmc:
         metadata["pmc"] = pmc
+    
+    # 1. Extract abstract.
     abstract = extract_abstract(get_article_meta(soup))
-    text = extract_text(soup)
-    # Add word counts into metadata; log failures per field
+
+    # 2. Extract the main body (as Markdown).
+    text = extract_body_with_markdown(soup)
+
+    # 3. Add word counts to metadata
     if count_error_log_path:
         try:
             os.makedirs(os.path.dirname(count_error_log_path), exist_ok=True)
@@ -419,6 +417,7 @@ def build_record(xml_bytes: bytes, count_error_log_path: str = None):
                     lf.write(f"{pmc}\tabstract_count\t{type(e).__name__}: {str(e).replace('\n',' ')}\n")
             except Exception:
                 pass
+                
     # text_count
     try:
         metadata["text_count"] = count_words(text)
@@ -429,6 +428,7 @@ def build_record(xml_bytes: bytes, count_error_log_path: str = None):
                     lf.write(f"{pmc}\ttext_count\t{type(e).__name__}: {str(e).replace('\n',' ')}\n")
             except Exception:
                 pass
+            
     return {"abstract": abstract, "text": text, "metadata": metadata}
 
 
@@ -464,6 +464,7 @@ def tar_to_jsonl(tar_path: str) -> str:
                 # Log PMC IDs that lack an abstract
                 if not (rec.get("abstract") or "").strip():
                     try:
+                        os.makedirs(os.path.dirname(log_path), exist_ok=True)
                         with open(log_path, "a", encoding="utf-8") as lf:
                             title = (rec.get("metadata", {}).get("article_title") or "").replace("\n", " ")
                             lf.write(f"{rec.get('metadata',{}).get('pmc','')}\t{title}\n")
@@ -472,12 +473,13 @@ def tar_to_jsonl(tar_path: str) -> str:
                         pass
                 fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 kept += 1
-            except Exception:
+            except Exception as e:
                 skipped += 1  # skip invalid XML or other errors
+                print(f"[ERROR] Skipped {m.name} due to error: {e}", file=sys.stderr)
+
     print(f"[OK] {base}: parsed={parsed}, written={kept}, skipped={skipped}")
     print(f"[OUT] {out_path}")
     return out_path
-
 
 
 # ---------- Download tarball & make JSONL ----------
@@ -486,7 +488,16 @@ def download_tar(tar_name: str) -> str:
     out = os.path.join(RAW_DIR, tar_name)
     if not os.path.exists(out):
         print(f"[download] {url}")
-        urllib.request.urlretrieve(url, out)
+        # Download to a temporary file to avoid corrupted files on interruption
+        tmp_out = out + ".tmp"
+        try:
+            urllib.request.urlretrieve(url, tmp_out)
+            os.rename(tmp_out, out)
+        except Exception as e:
+            print(f"[ERROR] Download failed: {e}", file=sys.stderr)
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+            sys.exit(1)
     else:
         print(f"[skip] already exists: {out}")
     return out
@@ -496,24 +507,36 @@ def download_tar(tar_name: str) -> str:
 def main():
     if len(sys.argv) < 2:
         print("Usage:")
-        print("python run.py <tar_name_or_url>  # π.χ. oa_comm_xml.PMC012xxxxxx.baseline.2025-06-26.tar.gz")
+        print("python run.py <tar_name_or_url>  # e.g., oa_comm_xml.PMC012xxxxxx.baseline.2025-06-26.tar.gz")
         sys.exit(1)
 
     arg = sys.argv[1] # tar file name or full URL
-    # assume it's a URL
-    if arg.startswith("http"): 
-        tar_path = os.path.join(RAW_DIR, os.path.basename(arg))  # e.g. data/tar/oa_comm_xml.PMC012xxxxxx.baseline.2025-06-26.tar.gz
+    tar_path = None
+    
+    if arg.startswith("http"):
+        tar_name = os.path.basename(arg)
+        tar_path = os.path.join(RAW_DIR, tar_name)
         if not os.path.exists(tar_path):
             print(f"[download] {arg}")
-            urllib.request.urlretrieve(arg, tar_path)
-    # assume it's a local path or just a tar file name
-    elif arg.endswith(".tar") or arg.endswith(".tar.gz"): 
-        tar_path = download_tar(os.path.basename(arg)) if not os.path.isabs(arg) else arg
+            tmp_path = tar_path + ".tmp"
+            try:
+                urllib.request.urlretrieve(arg, tmp_path)
+                os.rename(tmp_path, tar_path)
+            except Exception as e:
+                print(f"[ERROR] Download failed: {e}", file=sys.stderr)
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                sys.exit(1)
+        else:
+            print(f"[skip] already exists: {tar_path}")
     else:
-        tar_path = download_tar(arg) 
+        tar_path = download_tar(os.path.basename(arg))
 
-    tar_to_jsonl(tar_path)
-
+    if tar_path and os.path.exists(tar_path):
+        tar_to_jsonl(tar_path)
+    else:
+        print(f"[ERROR] Tar file not found at: {tar_path}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
