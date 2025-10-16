@@ -167,8 +167,66 @@ def is_in_ignored_section(tag) -> bool:
     """Detect if a tag is inside sections we want to exclude from body text
     (acknowledgments, references, bibliography, appendix, supplementary, etc.).
     """
-    IGNORE_SECTION_TITLES = re.compile(r"^(acknowledg(e)?ments?|references?|bibliograph(y|ies)|appendix|supplementar(y|ies|y materia(l|ls))|supplemental|conflict(s)? of interest|author contribution(s)?|funding)$", re.IGNORECASE)
-    IGNORE_SEC_TYPE = {"supplementary-material", "display-objects"}
+    IGNORE_SECTION_TITLES = re.compile(
+        r"^(?:"
+        # Core sections
+        r"acknowledg(e)?ments?|"
+        r"references?|"
+        r"bibliograph(?:y|ies)|"
+
+        # Author Contributions
+        r"author(?:s'|'s|s)? ?contribution(?:s)?|"
+        r"contributor(?:s)?(?: information)?|"
+        r"credit authorship contribution statement|"
+
+        # Competing Interests & Ethics
+        r"(?:declaration of )?competing interest(?:s)?|"
+        r"ethics statement|"
+
+        # History & Notes
+        r"pre-publication history|"
+        r"note added in proof|"
+        r"endnotes?|"
+        r"footnotes?|"
+
+        # Supplementary & Data
+        r"supplementar(?:y|ies|y material(?:s)?)?|"
+        r"supplemental|"
+        r"supporting information|"
+        r"additional data files|"
+        r"associated data|"
+
+        # Lists & Terminology
+        r"(?:list of )?abbreviations(?: used)?|"
+        r"nomenclature|"
+        r"list of symbols|"
+
+        # Availability
+        r"data availability(?: statement)?|"
+        r"availability(?: and requirements)?|"
+
+        # Meta, Legal & Publishing
+        r"funding(?: sources)?|"
+        r"disclaimer|"
+        r"open access|"
+        r"copyright(?: information)?|"
+        r"license|"
+        r"permissions|"
+        r"how to cite|"
+
+        # Summary-like sections (excluding main abstract)
+        r"highlights|"
+        r"key points|"
+        r"keywords|"
+        r"graphical abstract|"
+        
+        # Other common meta
+        r"limitation(?:s)?|"
+        r"appendix(?: [A-Z0-9]+)?"
+        r")$",
+        re.IGNORECASE
+    )
+    IGNORE_SEC_TYPES = {"supplementary-material", "display-objects", "glossary", "appendix"}
     
     p = getattr(tag, "parent", None)
     while p is not None:
@@ -179,7 +237,7 @@ def is_in_ignored_section(tag) -> bool:
         if name == "sec":
             # 1. Check for ignored section types
             sec_type = (p.get("sec-type") or "").lower()
-            if sec_type in IGNORE_SEC_TYPE:
+            if sec_type in IGNORE_SEC_TYPES:
                 return True
 
             # 2. Look for a title child to decide
