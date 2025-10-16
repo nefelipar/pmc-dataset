@@ -168,13 +168,21 @@ def is_in_ignored_section(tag) -> bool:
     (acknowledgments, references, bibliography, appendix, supplementary, etc.).
     """
     IGNORE_SECTION_TITLES = re.compile(r"^(acknowledg(e)?ments?|references?|bibliograph(y|ies)|appendix|supplementar(y|ies|y materia(l|ls))|supplemental|conflict(s)? of interest|author contribution(s)?|funding)$", re.IGNORECASE)
+    IGNORE_SEC_TYPE = {"supplementary-material", "display-objects"}
+    
     p = getattr(tag, "parent", None)
     while p is not None:
         name = (getattr(p, "name", None) or "").lower()
-        if name in {"ack", "ref-list"}:  # explicit back-matter containers
+        if name in {"ack", "ref-list", "glossary", "fn-group"}:  # explicit back-matter containers
             return True
+        
         if name == "sec":
-            # Look for a title child to decide
+            # 1. Check for ignored section types
+            sec_type = (p.get("sec-type") or "").lower()
+            if sec_type in IGNORE_SEC_TYPE:
+                return True
+
+            # 2. Look for a title child to decide
             t = p.find("title")
             if t:
                 title_text = clean(t.get_text(" ", strip=True))
