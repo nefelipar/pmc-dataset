@@ -29,7 +29,6 @@ def clean(s: str) -> str:
     s = html.unescape(s)  # Handling HTML entities  like &#x02013;
     s = normalize("NFC", s)  # Normalize to unicode
 
-
     # Remove parenthetical references to figures/tables and citations, replacing
     # the entire parenthesis with "" per requirement, e.g.:
     # (Figure 1a) → "", (Table 2) → "", (Bozdech et al. 2003) → "",
@@ -64,7 +63,7 @@ def clean(s: str) -> str:
         r")"
         r"(?:\s*(?:,|;|and)\s*"  # optionally more tokens joined by connectors
         r"(?:[A-Za-z]?\s*(?:[IVX]+|\d+)[A-Za-z]*"
-        r"(?:\s*[–-]\s*[A-Za-z]?\s*(?:[IVX]+|\d+)[A-Za-z]*)?" 
+        r"(?:\s*[–-]\s*[A-Za-z]?\s*(?:[IVX]+|\d+)[A-Za-z]*)?"
         r"))*"
         r"[A-Za-z]{0,2}",  # swallow any trailing panel letters glued to </xref>
         flags=re.IGNORECASE,
@@ -144,7 +143,7 @@ def count_words(text: str) -> int:
 
 
 def in_boundary_without_forbidden(tag, boundary_name: str) -> bool:
-    """ Check if `tag` is within a boundary (e.g. "body", "abstract") 
+    """ Check if `tag` is within a boundary (e.g. "body", "abstract")
         but not inside tables, figures/images, captions, or table-wraps.
         If boundary_name is None or empty, just check not in table/table-wrap.
     """
@@ -175,11 +174,19 @@ def is_in_ignored_section(tag) -> bool:
         r"bibliograph(?:y|ies)|"
 
         # Author Contributions
-        r"author(?:s'|'s|s)? ?contribution(?:s)?|"
+        r"(?:authours|autors|authors?)'?(?:s|'s)? ?(?:contributions?|contribtions?|conributions?|constributions?|protections|rights(?: and users' rights)?|voice|competing interest(?:s)?|conflict of interest)|"
+        r"contributions?(?: of .*)?|"
         r"contributor(?:s)?(?: information)?|"
         r"credit authorship contribution statement|"
 
+        # Collaboration
+        r"col{1,2}ab(?:o|a)?rations?|"
+
+        # List of people/committees
+        r"(?:clinical centres and )?investigators|committee members|working group|"
+
         # Competing Interests & Ethics
+        r"conflict of interests?|"
         r"(?:declaration of )?competing interest(?:s)?|"
         r"ethics statement|"
 
@@ -187,31 +194,36 @@ def is_in_ignored_section(tag) -> bool:
         r"pre-publication history|"
         r"note added in proof|"
         r"endnotes?|"
+        r"notes?|"
         r"footnotes?|"
 
         # Supplementary & Data
         r"supplementar(?:y|ies|y material(?:s)?)?|"
         r"supplemental|"
         r"supporting information|"
-        r"additional data files|"
+        r"additional (?:data )?files?|"
         r"associated data|"
 
         # Lists & Terminology
-        r"(?:list of )?abbreviations(?: used)?|"
+        r"(?:lists? of )?(?:non-standard )?abb?re?vi?ations?(?: .*)?|"
         r"nomenclature|"
         r"list of symbols|"
 
         # Availability
         r"data availability(?: statement)?|"
         r"availability(?: and requirements)?|"
+        r"free(?:, full-text)?(?: access)? (?:versus open access|for all articles?)|"
+
 
         # Meta, Legal & Publishing
-        r"funding(?: sources)?|"
+        r"(?:source of )?funding(?: sources?| acknowledg[em]+nts?| and ethics| for .* research| statement| support|/support)?|"
         r"disclaimer|"
         r"open access|"
-        r"copyright(?: information)?|"
+        r"copyright(?: .*)?|"
         r"license|"
         r"permissions|"
+        r"intellectual property rights|"
+        r"peer review policy|journal scope|update|"
         r"how to cite|"
 
         # Summary-like sections (excluding main abstract)
@@ -219,48 +231,39 @@ def is_in_ignored_section(tag) -> bool:
         r"key points|"
         r"keywords|"
         r"graphical abstract|"
-        
+        r"glossary|term definitions|"
+
         # Other common meta
-        r"limitation(?:s)?|"
-        r"appendix(?: [A-Z0-9]+)?"
+        # r"limitation(?:s)?|"
+        r"append(?:ix|ices)(?:[:\s].*)?"
         r")$",
         re.IGNORECASE
     )
     IGNORE_SEC_TYPES = {"supplementary-material", "display-objects", "glossary", "appendix"}
-    
-    p = getattr(tag, "parent", None)
-    while p is not None:
-        name = (getattr(p, "name", None) or "").lower()
+
+    node_to_check = tag
+    while node_to_check is not None:
+        name = (getattr(node_to_check, "name", None) or "").lower()
+        if not name:
+            node_to_check = getattr(node_to_check, "parent", None)
+            continue
+
         if name in {"ack", "ref-list", "glossary", "fn-group"}:  # explicit back-matter containers
             return True
-        
         if name == "sec":
             # 1. Check for ignored section types
-            sec_type = (p.get("sec-type") or "").lower()
+            sec_type = (node_to_check.get("sec-type") or "").lower()
             if sec_type in IGNORE_SEC_TYPES:
                 return True
 
             # 2. Look for a title child to decide
-            t = p.find("title")
+            t = node_to_check.find("title", recursive=False)
             if t:
                 title_text = clean(t.get_text(" ", strip=True))
                 if title_text and IGNORE_SECTION_TITLES.match(title_text):
                     return True
-        p = getattr(p, "parent", None)
+        node_to_check = getattr(node_to_check, "parent", None)
     return False
-
-
-# def replace_math_with_placeholder(soup_or_tag):
-#     """Replace all math nodes with the literal placeholder [MATH].
-#     Covers inline and display math in common JATS forms.
-#     """
-#     math_like = []
-#     # Collect various math representations
-#     math_like.extend(soup_or_tag.find_all(["inline-formula", "disp-formula", "tex-math"]))
-#     # Namespaced MathML can appear as mml:math or math
-#     math_like.extend([t for t in soup_or_tag.find_all(True) if (t.name or "").lower().endswith(":math") or (t.name or "").lower() == "math"])
-#     for m in math_like:
-#         m.replace_with(soup_or_tag.new_string("[MATH]"))
 
 
 def remove_images_and_captions(soup_or_tag):
@@ -290,7 +293,7 @@ def remove_figure_table_xrefs_and_glued(soup_or_tag):
 
 
 # ---------- JATS pickers ----------
-def _process_section_markdown(section_tag, level):
+def _process_section_markdown(section_tag, level, kept_titles_set):
     """
     Recursive helper function to process a section (<sec>) and its children.
     Returns a list of Markdown-formatted text blocks.
@@ -302,7 +305,7 @@ def _process_section_markdown(section_tag, level):
             continue  # Ignore strings that are just whitespace between tags
 
         tag_name = (child.name or "").lower()
-        
+
         # Filter out unwanted sections before processing them
         if is_in_ignored_section(child):
             continue
@@ -310,6 +313,10 @@ def _process_section_markdown(section_tag, level):
         if tag_name == 'title':
             title_text = text_from(child)
             if title_text:
+                # Adds the title to the set ONLY if it's a main section title (level 1).
+                if level == 1:
+                    kept_titles_set.add(title_text)
+
                 # Use the level to set the Markdown hashes (e.g., #, ##, ###)
                 content_blocks.append(f"{'#' * level} {title_text}")
 
@@ -321,12 +328,12 @@ def _process_section_markdown(section_tag, level):
 
         elif tag_name == 'sec':
             # Recursive call for the subsection, increasing the hierarchy level
-            content_blocks.extend(_process_section_markdown(child, level + 1))
+            content_blocks.extend(_process_section_markdown(child, level + 1, kept_titles_set))
 
     return content_blocks
 
 
-def extract_body_with_markdown(soup):
+def extract_body_with_markdown(soup, kept_titles_set):
     """
     Extracts the main body of the article, preserving section titles and subtitles
     and formatting them as Markdown, starting from Level 1 (#).
@@ -334,15 +341,15 @@ def extract_body_with_markdown(soup):
     body = soup.find("body")
     if not body:
         return ""
-        
+
     # First, sanitize the structure within the body
     remove_images_and_captions(body)
     remove_figure_table_xrefs_and_glued(body)
-    
+
     # Start the recursive processing from the body.
-    # Main sections will start with level 0 (#).
-    all_blocks = _process_section_markdown(body, 0)
-    
+    # Initial call with level=0 makes main sections start with '#'.
+    all_blocks = _process_section_markdown(body, 0, kept_titles_set)
+
     return "\n\n".join(all_blocks)
 
 
@@ -446,8 +453,7 @@ def extract_metadata(soup):
     return pmc, meta
 
 
-
-def build_record(xml_bytes: bytes, count_error_log_path: str = None):
+def build_record(xml_bytes: bytes, kept_titles_set: set, count_error_log_path: str = None):
     """
     Creates a JSON record where:
     - "abstract": contains the abstract in plain text.
@@ -459,12 +465,12 @@ def build_record(xml_bytes: bytes, count_error_log_path: str = None):
 
     if pmc:
         metadata["pmc"] = pmc
-    
+
     # 1. Extract abstract.
     abstract = extract_abstract(get_article_meta(soup))
 
     # 2. Extract the main body (as Markdown).
-    text = extract_body_with_markdown(soup)
+    text = extract_body_with_markdown(soup, kept_titles_set)
 
     # 3. Add word counts to metadata
     if count_error_log_path:
@@ -480,10 +486,10 @@ def build_record(xml_bytes: bytes, count_error_log_path: str = None):
         if count_error_log_path and pmc:
             try:
                 with open(count_error_log_path, "a", encoding="utf-8") as lf:
-                    lf.write(f"{pmc}\tabstract_count\t{type(e).__name__}: {str(e).replace('\n',' ')}\n")
+                    lf.write(f"{pmc}\tabstract_count\t{type(e).__name__}: {str(e).replace('n',' ')}\n")
             except Exception:
                 pass
-                
+
     # text_count
     try:
         metadata["text_count"] = count_words(text)
@@ -491,10 +497,10 @@ def build_record(xml_bytes: bytes, count_error_log_path: str = None):
         if count_error_log_path and pmc:
             try:
                 with open(count_error_log_path, "a", encoding="utf-8") as lf:
-                    lf.write(f"{pmc}\ttext_count\t{type(e).__name__}: {str(e).replace('\n',' ')}\n")
+                    lf.write(f"{pmc}\ttext_count\t{type(e).__name__}: {str(e).replace('n',' ')}\n")
             except Exception:
                 pass
-            
+
     return {"abstract": abstract, "text": text, "metadata": metadata}
 
 
@@ -510,23 +516,28 @@ def tar_to_jsonl(tar_path: str) -> str:
     out_path = os.path.join(OUT_DIR, f"{prefix}.jsonl.gz") # e.g. data/jsonl/oa_comm_xml.PMC012xxxxxx.baseline.2025-06-26.jsonl.gz
     log_path = os.path.join(LOG_DIR, f"{prefix}/missing_abstracts.log")
     count_error_log_path = os.path.join(LOG_DIR, f"{prefix}/error_count.log")
+    
+    titles_log_path = os.path.join(LOG_DIR, f"{prefix}/kept_section_titles.log")
+    
     try:
-        os.makedirs(os.path.dirname(count_error_log_path), exist_ok=True)
+        os.makedirs(os.path.dirname(titles_log_path), exist_ok=True)
     except Exception:
         pass
 
     parsed = kept = skipped = 0
+    all_kept_titles = set()
+
     with tarfile.open(tar_path, "r:gz") as tf, gzip.open(out_path, "wt", encoding="utf-8") as fout:
         for m in tf.getmembers():
             if not m.isfile() or not (m.name or "").lower().endswith(".xml"):
                 continue
             f = tf.extractfile(m)
-            if not f: 
+            if not f:
                 continue
             xml_bytes = f.read()
             parsed += 1
             try:
-                rec = build_record(xml_bytes, count_error_log_path=count_error_log_path)
+                rec = build_record(xml_bytes, all_kept_titles, count_error_log_path=count_error_log_path)
                 # Log PMC IDs that lack an abstract
                 if not (rec.get("abstract") or "").strip():
                     try:
@@ -542,6 +553,19 @@ def tar_to_jsonl(tar_path: str) -> str:
             except Exception as e:
                 skipped += 1  # skip invalid XML or other errors
                 print(f"[ERROR] Skipped {m.name} due to error: {e}", file=sys.stderr)
+
+    ## After processing is complete, write the collected titles to the log file.
+    if all_kept_titles:
+        print(f"[LOG] Writing {len(all_kept_titles)} unique kept titles to {titles_log_path}")
+        try:
+            # Sort titles alphabetically for easier review
+            sorted_titles = sorted(list(all_kept_titles))
+            with open(titles_log_path, "w", encoding="utf-8") as logf:
+                for title in sorted_titles:
+                    logf.write(title + "\n")
+        except Exception as e:
+            print(f"[ERROR] Could not write titles log file: {e}", file=sys.stderr)
+
 
     print(f"[OK] {base}: parsed={parsed}, written={kept}, skipped={skipped}")
     print(f"[OUT] {out_path}")
@@ -578,7 +602,7 @@ def main():
 
     arg = sys.argv[1] # tar file name or full URL
     tar_path = None
-    
+
     if arg.startswith("http"):
         tar_name = os.path.basename(arg)
         tar_path = os.path.join(RAW_DIR, tar_name)
