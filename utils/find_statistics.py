@@ -10,7 +10,7 @@ jsonl_path = "data/jsonl/oa_comm_xml.PMC000xxxxxx.baseline.2025-06-26.jsonl.gz"
 
 # Configure logging to file named like the JSONL base
 base_name = re.sub(r"\.jsonl(\.gz)?$", "", Path(jsonl_path).name)
-logs_dir = Path("data/log")
+logs_dir = Path("data/logs")
 logs_dir.mkdir(parents=True, exist_ok=True)
 log_path = logs_dir / f"{base_name}.log"
 
