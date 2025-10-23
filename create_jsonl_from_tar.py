@@ -81,11 +81,11 @@ def clean(s: str) -> str:
     # s = figtab_pattern.sub(" ", s)
 
     # Remove inline author-year style citations not in parentheses
-    # e.g., "Bozdech et al. 2003", "Smith and Doe 2014", "Smith 2014a", "Smith et al., 2003"
+    # e.g., "Bozdech et al. 2003", "Smith and Doe 2014", "Smith et al., 2003"
     author_year_pattern = re.compile(
         r"\b"                                 # start at word boundary
         r"[A-Z][A-Za-z-]+"                     # Surname
-        r"(?:\s+(?:and|&)\s+[A-Z][A-Za-z-]+|\s+et\s+al\.?)*"  # and/& second or et al.
+        r"(?:\s+(?:and|&)\s+[A-Z][A-Za-z-]+|\s+et\s+al\.?)+" # (and Surname | et al.)
         r",?\s+"                              # optional comma then space
         r"\(?\d{4}[a-z]?\)?"                 # year with optional letter and parentheses
         r"\b"
@@ -154,7 +154,7 @@ def count_words(text: str) -> int:
 
 def in_boundary_without_forbidden(tag, boundary_name: str) -> bool:
     """ Check if `tag` is within a boundary (e.g. "body", "abstract")
-        but not inside tables, figures/images, captions, or table-wraps.
+        but not inside tables, figures/images or table-wraps.
         If boundary_name is None or empty, just check not in table/table-wrap.
     """
     p = getattr(tag, "parent", None)
@@ -164,7 +164,7 @@ def in_boundary_without_forbidden(tag, boundary_name: str) -> bool:
         if not name:
             p = getattr(p, "parent", None)
             continue
-        if name in {"table", "table-wrap", "fig", "figure", "graphic", "inline-graphic", "media", "caption"}:
+        if name in {"table", "table-wrap", "fig", "figure", "graphic", "inline-graphic", "media"}:
             return False
         if name == boundary_name:
             return True
@@ -276,9 +276,9 @@ def is_in_ignored_section(tag) -> bool:
     return False
 
 
-def remove_images_and_captions(soup_or_tag):
-    """Remove figures/images and their captions completely from the tree."""
-    for tname in ["fig", "figure", "graphic", "inline-graphic", "media", "caption"]:
+def remove_figures_and_tables(soup_or_tag):
+    """Remove figures and tables and their captions completely from the tree."""
+    for tname in ["fig", "figure", "graphic", "inline-graphic", "media", "table", "table-wrap"]:
         for el in soup_or_tag.find_all(tname):
             el.decompose()
 
@@ -327,9 +327,52 @@ def fix_glued_xrefs(soup_or_tag):
 
 
 # ---------- JATS pickers ----------
-def _process_section_markdown(section_tag, level, kept_titles_set):
+# def _process_section_markdown(section_tag, level, kept_titles_set):
+#     """
+#     Recursive helper function to process a section (<sec>) and its children.
+#     Returns a list of Markdown-formatted text blocks.
+#     """
+#     content_blocks = []
+#     # Process direct children to maintain order
+#     for child in section_tag.children:
+#         if isinstance(child, NavigableString):
+#             continue  # Ignore strings that are just whitespace between tags
+
+#         tag_name = (child.name or "").lower()
+
+#         # Filter out unwanted sections before processing them
+#         if is_in_ignored_section(child):
+#             continue
+
+#         if tag_name == 'title':
+#             title_text = text_from(child)
+#             if title_text:
+#                 # Adds the title to the set ONLY if it's a main section title (level 1).
+#                 if level == 1:
+#                     kept_titles_set.add(title_text)
+
+#                 # Use the level to set the Markdown hashes (e.g., #, ##, ###)
+#                 content_blocks.append(f"{'#' * level} {title_text}")
+
+#         elif tag_name == 'p':
+#             if in_boundary_without_forbidden(child, "body"):
+#                 p_text = text_from(child)
+#                 if p_text:
+#                     content_blocks.append(p_text)
+        
+#         elif tag_name == 'sec':
+#             # Recursive call for the subsection, increasing the hierarchy level
+#             content_blocks.extend(_process_section_markdown(child, level + 1, kept_titles_set))
+
+#     return content_blocks
+
+
+# ---------- JATS pickers ----------
+def _process_section_markdown(section_tag, level, kept_titles_set, blockquote_prefix: str = ""):
     """
     Recursive helper function to process a section (<sec>) and its children.
+    Handles nested <sec>, <p>, <list>, <caption> and <boxed-text>.
+    Applies a `blockquote_prefix` (e.g., "> ") if inside a <boxed-text>.
     Returns a list of Markdown-formatted text blocks.
     """
     content_blocks = []
@@ -347,24 +390,95 @@ def _process_section_markdown(section_tag, level, kept_titles_set):
         if tag_name == 'title':
             title_text = text_from(child)
             if title_text:
-                # Adds the title to the set ONLY if it's a main section title (level 1).
                 if level == 1:
                     kept_titles_set.add(title_text)
+                content_blocks.append(f"{blockquote_prefix}{'#' * level} {title_text}")
 
-                # Use the level to set the Markdown hashes (e.g., #, ##, ###)
-                content_blocks.append(f"{'#' * level} {title_text}")
-
+        # --- CORRECTED 'p' HANDLER ---
         elif tag_name == 'p':
-            if in_boundary_without_forbidden(child, "body"):
-                p_text = text_from(child)
-                if p_text:
-                    content_blocks.append(p_text)
-        
-        elif tag_name == 'sec':
-            # Recursive call for the subsection, increasing the hierarchy level
-            content_blocks.extend(_process_section_markdown(child, level + 1, kept_titles_set))
+            # Check if this <p> tag contains other block-level elements (like <list>)
+            # This is technically invalid JATS, but common in real-world XML.
+            block_children = child.find_all(['list', 'sec', 'boxed-text', 'p'], recursive=False)
+            
+            if not block_children:
+                # --- Simple Case ---
+                # This <p> only contains text and inline tags (<b>, <i>, etc.)
+                # We can safely get its text.
+                if in_boundary_without_forbidden(child, "body") or \
+                   in_boundary_without_forbidden(child, "abstract") or \
+                   in_boundary_without_forbidden(child, "boxed-text"):
+                    
+                    p_text = text_from(child)
+                    if p_text:
+                        content_blocks.append(f"{blockquote_prefix}{p_text}")
+            else:
+                # --- Complex Case ---
+                # This <p> is acting as a "wrapper" for other blocks (like <list>).
+                # Do NOT call text_from(). Instead, recurse into this <p>
+                # as if it were a <sec>, but without changing the header level.
+                content_blocks.extend(
+                    _process_section_markdown(child, level, kept_titles_set, blockquote_prefix)
+                )
+        # --- END 'p' HANDLER CORRECTION ---
 
-    return content_blocks
+        # --- Handle lists ---
+        elif tag_name == 'list':
+            list_items = []
+            list_type = (child.get("list-type") or "bullet").lower()
+            is_ordered = "order" in list_type or "decimal" in list_type
+            
+            item_counter = 1
+            # A <list-item> can also contain <p> tags, so we must recurse!
+            for item in child.find_all("list-item", recursive=False):
+                # We get the text by processing the *children* of the list-item
+                # This correctly handles <list-item><p>...</p></list-item>
+                
+                # We use a helper function to get text *without* calling _process_section_markdown
+                # to avoid nested list detection issues. text_from() is correct here.
+                item_text = text_from(item)
+                
+                if item_text:
+                    if is_ordered:
+                        prefix = f"{item_counter}."
+                        item_counter += 1
+                    else:
+                        prefix = "*" # Use asterisk for bullets
+                    
+                    list_items.append(f"{blockquote_prefix}{prefix} {item_text}")
+            
+            if list_items:
+                content_blocks.append("\n".join(list_items))
+        # --- END Handle lists ---
+
+        # --- NEW: Handle caption (for boxed-text) ---
+        elif tag_name == 'caption':
+            title_tag = child.find("title", recursive=False)
+            if title_tag:
+                title_text = text_from(title_tag)
+                if title_text:
+                    content_blocks.append(f"{blockquote_prefix}### {title_text}")
+            
+            for p in child.find_all("p", recursive=False):
+                p_text = text_from(p)
+                if p_text:
+                    content_blocks.append(f"{blockquote_prefix}{p_text}")
+        # --- END Handle caption ---
+
+        # --- CORRECTED: Handle boxed-text ---
+        elif tag_name == 'boxed-text':
+            box_content = _process_section_markdown(
+                child, level + 1, kept_titles_set, blockquote_prefix + "> "
+            )
+            content_blocks.extend(box_content)
+        # --- END Handle boxed-text ---
+
+        elif tag_name == 'sec':
+            content_blocks.extend(_process_section_markdown(child, level + 1, kept_titles_set, blockquote_prefix))
+
+    # Return only blocks that actually have content
+    # We join blocks with \n\n in the parent function (extract_body_with_markdown)
+    return [block for block in content_blocks if block.strip()]
+
 
 
 def extract_body_with_markdown(soup, kept_titles_set):
@@ -377,7 +491,7 @@ def extract_body_with_markdown(soup, kept_titles_set):
         return ""
 
     # First, sanitize the structure within the body
-    remove_images_and_captions(body)
+    remove_figures_and_tables(body)
     fix_glued_xrefs(body)
 
     # Start the recursive processing from the body.
@@ -389,7 +503,7 @@ def extract_body_with_markdown(soup, kept_titles_set):
 
 
 def extract_abstract(art):
-    """Only normal abstracts, no graphical/teaser/etc; math → [MATH]; no tables/images."""
+    """Only normal abstracts, no graphical/teaser/etc; handles structured abstracts."""
     def pick_normal_abstract(art):
         BAD = {"graphical","teaser","author-summary","editor-summary","lay-summary"}
         if not art: return None
@@ -404,17 +518,50 @@ def extract_abstract(art):
     abs_el = pick_normal_abstract(art)
     if not abs_el:
         return ""
+        
+    # Find the top-level <title> of the abstract (if it exists)
+    top_title = abs_el.find("title", recursive=False)
+    if top_title:
+        title_text = text_from(top_title)
+        # If the title is just "ABSTRACT", remove it before processing.
+        if title_text.strip().upper() == "ABSTRACT":
+            top_title.decompose()
+
     # sanitize abstract structure
-    remove_images_and_captions(abs_el)
+    remove_figures_and_tables(abs_el) 
     fix_glued_xrefs(abs_el)
-    paras = []
-    for p in abs_el.find_all("p"):
-        # boundary-aware check
-        if in_boundary_without_forbidden(p, "abstract"):
-            t = text_from(p)
-            if t:
-                paras.append(t)
-    return "\n\n".join(paras)
+    dummy_title_set = set() 
+    all_blocks = _process_section_markdown(abs_el, 1, dummy_title_set)
+    return "\n\n".join(all_blocks)
+
+
+# def extract_abstract(art):
+#     """Only normal abstracts, no graphical/teaser/etc; math → [MATH]; no tables/images."""
+#     def pick_normal_abstract(art):
+#         BAD = {"graphical","teaser","author-summary","editor-summary","lay-summary"}
+#         if not art: return None
+#         cands = art.find_all("abstract", recursive=False)
+#         for a in cands:
+#             a_type = (a.get("abstract-type") or "").lower()
+#             if a_type and a_type in BAD:
+#                 continue
+#             return a
+#         return cands[0] if cands else None
+
+#     abs_el = pick_normal_abstract(art)
+#     if not abs_el:
+#         return ""
+#     # sanitize abstract structure
+#     remove_figures_and_tables(abs_el)
+#     fix_glued_xrefs(abs_el)
+#     paras = []
+#     for p in abs_el.find_all("p"):
+#         # boundary-aware check
+#         if in_boundary_without_forbidden(p, "abstract"):
+#             t = text_from(p)
+#             if t:
+#                 paras.append(t)
+#     return "\n\n".join(paras)
 
 
 
