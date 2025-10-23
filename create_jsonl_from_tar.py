@@ -51,10 +51,16 @@ def clean(s: str) -> str:
         # multiple years separated by ; or , typical for grouped citations
         if re.search(r"\b(19|20)\d{2}\b", inner) and (";" in inner or "," in inner):
             return ""
+        # rule for numerical refrences only (e.g., (1, 2, 3), [4-6], (1;2))
+        if re.fullmatch(r"[\d\s,–;;-]+", inner.strip()):
+            return ""
         return match.group(0)
-
+    
     # Replace non-nested parentheses of the above forms
     s = re.sub(r"\(([^()]*)\)", _paren_replacer, s)
+
+    # Replace non-nested brackets of the above forms
+    s = re.sub(r"\[([^\[\]]*)\]", _paren_replacer, s)
 
     # CHANGE
     # # Also remove figure/table references even when not in parentheses
@@ -277,17 +283,15 @@ def remove_images_and_captions(soup_or_tag):
             el.decompose()
 
 
-def fix_glued_xrefs_and_delete_non_usable_xrefs(soup_or_tag):
+def fix_glued_xrefs(soup_or_tag):
     """
-    - Deletes non-content <xref> tags (e.g., bibr, aff, fn).
     - KEEPS content <xref> tags (e.g., fig, table).
     - For kept tags, it fixes "glued panel letters" by merging them
       (e.g., <xref>Fig 1</xref>A becomes <xref>Fig 1A</xref>)
       to prevent "Fig 1 A" during text extraction.
     """
 
-    # NON_CONTENT_REFS = {"bibr", "app", "author-notes", "award", "bio", "collab", "contrib", "corresp", "fn", "kwd", "supplementary-material", "table-fn", "Restriction", "restriction", "aff"}
-    CONTENT_REFS = {"fig", "figure", "table", "tables", "plate", "scheme"}
+    CONTENT_REFS = {"fig", "figure", "table", "tables", "app", "boxed-text"}
 
     for xr in soup_or_tag.find_all("xref"):
         rt = (xr.get("ref-type") or "").lower()
@@ -320,17 +324,6 @@ def fix_glued_xrefs_and_delete_non_usable_xrefs(soup_or_tag):
 
                     # Update the sibling string to contain only what's left
                     ns.replace_with(remaining_text)
-        
-        # elif rt in NON_CONTENT_REFS:
-        #     ns = xr.next_sibling
-        #     if isinstance(ns, NavigableString):
-        #         s = str(ns)
-        #         m = re.match(r"^([A-Za-z]{1,2}(?:\s*[–-]\s*[A-Za-z]{1,2})?)", s)
-        #         if m:
-        #             ns.replace_with(s[len(m.group(1)):])
-            
-        #     # Delete the <xref> tag itself
-        #     xr.decompose()
 
 
 # ---------- JATS pickers ----------
@@ -366,7 +359,7 @@ def _process_section_markdown(section_tag, level, kept_titles_set):
                 p_text = text_from(child)
                 if p_text:
                     content_blocks.append(p_text)
-
+        
         elif tag_name == 'sec':
             # Recursive call for the subsection, increasing the hierarchy level
             content_blocks.extend(_process_section_markdown(child, level + 1, kept_titles_set))
@@ -385,14 +378,14 @@ def extract_body_with_markdown(soup, kept_titles_set):
 
     # First, sanitize the structure within the body
     remove_images_and_captions(body)
-    fix_glued_xrefs_and_delete_non_usable_xrefs(body)
+    fix_glued_xrefs(body)
 
     # Start the recursive processing from the body.
     # Initial call with level=0 makes main sections start with '#'.
     all_blocks = _process_section_markdown(body, 0, kept_titles_set)
 
+    # Join all collected blocks
     return "\n\n".join(all_blocks)
-
 
 
 def extract_abstract(art):
@@ -413,7 +406,7 @@ def extract_abstract(art):
         return ""
     # sanitize abstract structure
     remove_images_and_captions(abs_el)
-    fix_glued_xrefs_and_delete_non_usable_xrefs(abs_el)
+    fix_glued_xrefs(abs_el)
     paras = []
     for p in abs_el.find_all("p"):
         # boundary-aware check
