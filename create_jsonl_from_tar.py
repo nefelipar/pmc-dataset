@@ -22,83 +22,12 @@ os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 
-YEAR_TOKEN_RE = r"(?:19|20)\d{2}[a-z]?"
-YEAR_RE = re.compile(rf"\b{YEAR_TOKEN_RE}\b")
-ET_AL_RE = re.compile(r"\bet\s+al\.?\b", re.IGNORECASE)
-NAME_PREFIX_RE = r"(?:(?i:von|van|de|del|la|le|da|di|du)\s+)?"
-NAME_CORE_RE = r"[A-Z0-9À-ÖØ-Þ][A-Za-z0-9À-ÖØ-öø-ÿ'’.-]*"
-NAME_SEQUENCE_RE = rf"{NAME_PREFIX_RE}{NAME_CORE_RE}(?:\s+{NAME_CORE_RE})*"
-INLINE_ETAL_PATTERN = re.compile(
-    rf"\b{NAME_SEQUENCE_RE}\s+(?i:et)\s+(?i:al)\.?"
-    rf"(?:\s*(?:,|;)\s*)?(?:\s*\(?\b{YEAR_TOKEN_RE}\)?(?:\s*(?:,|;|and)\s*\(?\b{YEAR_TOKEN_RE}\)?)*)?",
-    flags=re.UNICODE,
-)
-INLINE_AUTHOR_YEAR_PATTERN = re.compile(
-    rf"\b{NAME_SEQUENCE_RE}(?:\s+(?:and|&)\s+{NAME_SEQUENCE_RE})?\s*\(?\b{YEAR_TOKEN_RE}\)?",
-    flags=re.UNICODE,
-)
-
 # ---------- Text cleaning & extraction ----------
 def clean(s: str) -> str:
     if s is None:
         return ""
-    s = html.unescape(s)  # Handling HTML entities  like &#x02013;
-    s = normalize("NFC", s)  # Normalize to unicode
-
-    # Remove parenthetical references to figures/tables and citations, replacing
-    # the entire parenthesis with "" per requirement, e.g.:
-    # (Figure 1a) → "", (Table 2) → "", (Bozdech et al. 2003) → "",
-    # (see Fig. 3; Smith 2004) → ""
-    def _paren_replacer(match: re.Match) -> str:
-        inner = match.group(1)
-        inner_lc = inner.lower()
-
-        if ET_AL_RE.search(inner):
-            return " [ref]"
-        if YEAR_RE.search(inner) and re.search(r"[A-Za-z]", inner):
-            return " [ref]"
-        if (";" in inner or "," in inner) and YEAR_RE.search(inner):
-            return " [ref]"
-        if re.fullmatch(r"[\d\s,–;;:-]+", inner.strip()):
-            return " [ref]"
-        return match.group(0)
-    
-    # Replace non-nested parentheses of the above forms
-    s = re.sub(r"\(([^()]*)\)", _paren_replacer, s)
-
-    # Replace non-nested brackets of the above forms
-    s = re.sub(r"\[([^\[\]]*)\]", _paren_replacer, s)
-
-    # CHANGE
-    # # Also remove figure/table references even when not in parentheses
-    # # e.g., "see Figure 1a", "Fig. 2B", "Tables 3–4"
-    # figtab_pattern = re.compile(
-    #     r"\b(?:see(?:\s+also)?\s+)?(?:fig(?:\.|s\.?|ures?)|figure|figs?|table|tables)\s*"
-    #     r"(?:"  # at least one token like 1, 1A, S1, II, 2B, 1A–C
-    #     r"[A-Za-z]?\s*(?:[IVX]+|\d+)[A-Za-z]*"  # allow zero or more letters after number
-    #     r"(?:\s*[–-]\s*[A-Za-z]?\s*(?:[IVX]+|\d+)[A-Za-z]*)?"
-    #     r")"
-    #     r"(?:\s*(?:,|;|and)\s*"  # optionally more tokens joined by connectors
-    #     r"(?:[A-Za-z]?\s*(?:[IVX]+|\d+)[A-Za-z]*"
-    #     r"(?:\s*[–-]\s*[A-Za-z]?\s*(?:[IVX]+|\d+)[A-Za-z]*)?"
-    #     r"))*"
-    #     r"[A-Za-z]{0,2}",  # swallow any trailing panel letters glued to </xref>
-    #     flags=re.IGNORECASE,
-    # )
-    # s = figtab_pattern.sub(" ", s)
-
-    def _inline_to_ref(match: re.Match) -> str:
-        text = match.group(0)
-        if not re.search(r"[a-zà-öø-ÿ]", text):
-            return text
-        start = match.start()
-        if start > 0 and not match.string[start - 1].isspace():
-            return " [ref]"
-        return "[ref]"
-
-    s = INLINE_ETAL_PATTERN.sub(_inline_to_ref, s)
-    s = INLINE_AUTHOR_YEAR_PATTERN.sub(_inline_to_ref, s)
-    s = re.sub(r"(?:\s*\[ref\]){2,}", " [ref]", s)
+    s = html.unescape(s) # Handling HTML entities like &#x02013;
+    s = normalize("NFC", s) # Normalize to unicode
 
     # Compress whitespace (spaces, tabs, newlines) to single space
     s = re.sub(r"[ \t\r\f\v]+", " ", s).strip()
@@ -106,14 +35,32 @@ def clean(s: str) -> str:
     # Remove spaces before punctuation (e.g. gene , name → gene, name)
     s = re.sub(r"\s+([,.;:!?%])", r"\1", s)
 
-    s = re.sub(r"([,.;:!?]){2,}", r"\1", s)
-    s = re.sub(r"\.{2,}", ".", s)
-
     # Don't leave space before closing brackets/quotes
     s = re.sub(r"\s+([)\]\}»”’])", r"\1", s)
 
     # Don't leave space after opening brackets/quotes
     s = re.sub(r"([(\[\{«“‘])\s+", r"\1", s)
+    
+    # This loop repeatedly applies the rules until the string
+    # stops changing, fixing nested cases like "([[ref]])".
+    s_before = ""
+    while s_before != s:
+        s_before = s
+
+        # 1. Coalesce multiple [ref]s inside parentheses and replace the whole group.
+        # e.g., "([ref])" -> "[ref]"
+        # e.g., "([ref], [ref])" -> "[ref]"
+        # e.g., "( [ref] ; [ref] )" -> "[ref]"
+        s = re.sub(r"\(\s*\[ref\](?:\s*[,;]\s*\[ref\])*\s*\)", "[ref]", s)
+        
+        # 2. Same for square brackets
+        # e.g., "[[ref]]" -> "[ref]"
+        # e.g., "[[ref], [ref]]" -> "[ref]"
+        s = re.sub(r"\[\s*\[ref\](?:\s*[,;]\s*\[ref\])*\s*\]", "[ref]", s)
+
+    # 3. (Failsafe) Coalesce adjacent [ref]s that might have been left over
+    # e.g., "[ref], [ref]" -> "[ref]"
+    s = re.sub(r"\[ref\](?:\s*[,;]\s*\[ref\])+", "[ref]", s)
 
     # Digit grouping commas: "1, 000" → "1,000"
     # Only if between digits (to avoid messing with lists)
@@ -133,7 +80,6 @@ def clean(s: str) -> str:
     s = re.sub(r"\s{2,}", " ", s).strip()
 
     return s
-
 
 
 def text_from(node) -> str:
@@ -292,6 +238,20 @@ def remove_figures_and_tables(soup_or_tag):
     for tname in ["fig", "figure", "graphic", "inline-graphic", "media", "table", "table-wrap"]:
         for el in soup_or_tag.find_all(tname):
             el.decompose()
+
+
+def replace_citations_with_placeholder(soup_or_tag):
+    """
+    Find all <xref> tags that are citations (ref-type=bibr or citation)
+    and replace them with the placeholder "[ref]".
+    This is more robust than regex-based removal.
+    """
+    CITATION_REFS = {"bibr", "citation"}
+ 
+    for xr in soup_or_tag.find_all("xref"):
+        rt = (xr.get("ref-type") or "").lower()
+        if rt in CITATION_REFS:
+            xr.replace_with("[ref]")
 
 
 def fix_glued_xrefs(soup_or_tag):
@@ -502,6 +462,7 @@ def extract_body_with_markdown(soup, kept_titles_set):
 
     # First, sanitize the structure within the body
     remove_figures_and_tables(body)
+    replace_citations_with_placeholder(body)
     fix_glued_xrefs(body)
 
     # Start the recursive processing from the body.
@@ -550,6 +511,7 @@ def extract_abstract(art):
 
     # sanitize abstract structure
     remove_figures_and_tables(abs_el)
+    replace_citations_with_placeholder(abs_el)
     fix_glued_xrefs(abs_el)
     dummy_title_set = set()
     all_blocks = _process_section_markdown(abs_el, 1, dummy_title_set)
@@ -686,9 +648,8 @@ def build_record(xml_bytes: bytes, kept_titles_set: set, count_error_log_path: s
     except Exception as e:
         if count_error_log_path and pmc:
             try:
-                error_msg = str(e).replace("\n", " ")
                 with open(count_error_log_path, "a", encoding="utf-8") as lf:
-                    lf.write(f"{pmc}\tabstract_count\t{type(e).__name__}: {error_msg}\n")
+                    lf.write(f"{pmc}\tabstract_count\t{type(e).__name__}: {str(e).replace('\n',' ')}\n")
             except Exception:
                 pass
 
@@ -698,9 +659,8 @@ def build_record(xml_bytes: bytes, kept_titles_set: set, count_error_log_path: s
     except Exception as e:
         if count_error_log_path and pmc:
             try:
-                error_msg = str(e).replace("\n", " ")
                 with open(count_error_log_path, "a", encoding="utf-8") as lf:
-                    lf.write(f"{pmc}\ttext_count\t{type(e).__name__}: {error_msg}\n")
+                    lf.write(f"{pmc}\ttext_count\t{type(e).__name__}: {str(e).replace('\n',' ')}\n")
             except Exception:
                 pass
 
