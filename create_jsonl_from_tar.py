@@ -22,6 +22,22 @@ os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 
+YEAR_TOKEN_RE = r"(?:19|20)\d{2}[a-z]?"
+YEAR_RE = re.compile(rf"\b{YEAR_TOKEN_RE}\b")
+ET_AL_RE = re.compile(r"\bet\s+al\.?\b", re.IGNORECASE)
+NAME_PREFIX_RE = r"(?:(?i:von|van|de|del|la|le|da|di|du)\s+)?"
+NAME_CORE_RE = r"[A-Z0-9À-ÖØ-Þ][A-Za-z0-9À-ÖØ-öø-ÿ'’.-]*"
+NAME_SEQUENCE_RE = rf"{NAME_PREFIX_RE}{NAME_CORE_RE}(?:\s+{NAME_CORE_RE})*"
+INLINE_ETAL_PATTERN = re.compile(
+    rf"\b{NAME_SEQUENCE_RE}\s+(?i:et)\s+(?i:al)\.?"
+    rf"(?:\s*(?:,|;)\s*)?(?:\s*\(?\b{YEAR_TOKEN_RE}\)?(?:\s*(?:,|;|and)\s*\(?\b{YEAR_TOKEN_RE}\)?)*)?",
+    flags=re.UNICODE,
+)
+INLINE_AUTHOR_YEAR_PATTERN = re.compile(
+    rf"\b{NAME_SEQUENCE_RE}(?:\s+(?:and|&)\s+{NAME_SEQUENCE_RE})?\s*\(?\b{YEAR_TOKEN_RE}\)?",
+    flags=re.UNICODE,
+)
+
 # ---------- Text cleaning & extraction ----------
 def clean(s: str) -> str:
     if s is None:
@@ -37,23 +53,14 @@ def clean(s: str) -> str:
         inner = match.group(1)
         inner_lc = inner.lower()
 
-        # CHANGE
-        # # figure/table hints
-        # if re.search(r"\b(fig(?:\.|ures?)?|figure|figs?|table|tables)\b", inner_lc):
-        #     return ""
-        
-        # citation with 'et al.' and year
-        if re.search(r"\bet\s+al\.?\b", inner_lc) and re.search(r"\b(19|20)\d{2}[a-z]?\b", inner):
-            return ""
-        # surname + year pattern (optionally two surnames joined by and/&)
-        if re.search(r"\b[A-Z][A-Za-z-]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z-]+)?\s+(?:\d{4}[a-z]?)\b", inner):
-            return ""
-        # multiple years separated by ; or , typical for grouped citations
-        if re.search(r"\b(19|20)\d{2}\b", inner) and (";" in inner or "," in inner):
-            return ""
-        # rule for numerical refrences only (e.g., (1, 2, 3), [4-6], (1;2))
-        if re.fullmatch(r"[\d\s,–;;-]+", inner.strip()):
-            return ""
+        if ET_AL_RE.search(inner):
+            return " [ref]"
+        if YEAR_RE.search(inner) and re.search(r"[A-Za-z]", inner):
+            return " [ref]"
+        if (";" in inner or "," in inner) and YEAR_RE.search(inner):
+            return " [ref]"
+        if re.fullmatch(r"[\d\s,–;;:-]+", inner.strip()):
+            return " [ref]"
         return match.group(0)
     
     # Replace non-nested parentheses of the above forms
@@ -80,23 +87,27 @@ def clean(s: str) -> str:
     # )
     # s = figtab_pattern.sub(" ", s)
 
-    # Remove inline author-year style citations not in parentheses
-    # e.g., "Bozdech et al. 2003", "Smith and Doe 2014", "Smith et al., 2003"
-    author_year_pattern = re.compile(
-        r"\b"                                 # start at word boundary
-        r"[A-Z][A-Za-z-]+"                     # Surname
-        r"(?:\s+(?:and|&)\s+[A-Z][A-Za-z-]+|\s+et\s+al\.?)+" # (and Surname | et al.)
-        r",?\s+"                              # optional comma then space
-        r"\(?\d{4}[a-z]?\)?"                 # year with optional letter and parentheses
-        r"\b"
-    )
-    s = author_year_pattern.sub(" ", s)
+    def _inline_to_ref(match: re.Match) -> str:
+        text = match.group(0)
+        if not re.search(r"[a-zà-öø-ÿ]", text):
+            return text
+        start = match.start()
+        if start > 0 and not match.string[start - 1].isspace():
+            return " [ref]"
+        return "[ref]"
+
+    s = INLINE_ETAL_PATTERN.sub(_inline_to_ref, s)
+    s = INLINE_AUTHOR_YEAR_PATTERN.sub(_inline_to_ref, s)
+    s = re.sub(r"(?:\s*\[ref\]){2,}", " [ref]", s)
 
     # Compress whitespace (spaces, tabs, newlines) to single space
     s = re.sub(r"[ \t\r\f\v]+", " ", s).strip()
 
     # Remove spaces before punctuation (e.g. gene , name → gene, name)
     s = re.sub(r"\s+([,.;:!?%])", r"\1", s)
+
+    s = re.sub(r"([,.;:!?]){2,}", r"\1", s)
+    s = re.sub(r"\.{2,}", ".", s)
 
     # Don't leave space before closing brackets/quotes
     s = re.sub(r"\s+([)\]\}»”’])", r"\1", s)
@@ -675,8 +686,9 @@ def build_record(xml_bytes: bytes, kept_titles_set: set, count_error_log_path: s
     except Exception as e:
         if count_error_log_path and pmc:
             try:
+                error_msg = str(e).replace("\n", " ")
                 with open(count_error_log_path, "a", encoding="utf-8") as lf:
-                    lf.write(f"{pmc}\tabstract_count\t{type(e).__name__}: {str(e).replace('\n',' ')}\n")
+                    lf.write(f"{pmc}\tabstract_count\t{type(e).__name__}: {error_msg}\n")
             except Exception:
                 pass
 
@@ -686,8 +698,9 @@ def build_record(xml_bytes: bytes, kept_titles_set: set, count_error_log_path: s
     except Exception as e:
         if count_error_log_path and pmc:
             try:
+                error_msg = str(e).replace("\n", " ")
                 with open(count_error_log_path, "a", encoding="utf-8") as lf:
-                    lf.write(f"{pmc}\ttext_count\t{type(e).__name__}: {str(e).replace('\n',' ')}\n")
+                    lf.write(f"{pmc}\ttext_count\t{type(e).__name__}: {error_msg}\n")
             except Exception:
                 pass
 
