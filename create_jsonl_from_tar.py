@@ -326,7 +326,6 @@ def fix_glued_xrefs(soup_or_tag):
                     ns.replace_with(remaining_text)
 
 
-# ---------- JATS pickers ----------
 # def _process_section_markdown(section_tag, level, kept_titles_set):
 #     """
 #     Recursive helper function to process a section (<sec>) and its children.
@@ -504,21 +503,32 @@ def extract_body_with_markdown(soup, kept_titles_set):
 
 def extract_abstract(art):
     """Only normal abstracts, no graphical/teaser/etc; handles structured abstracts."""
+    
     def pick_normal_abstract(art):
-        BAD = {"graphical","teaser","author-summary","editor-summary","lay-summary"}
+        """
+        Picks the main technical abstract using a strict "whitelist" approach.
+        It will ONLY return an abstract if its type is known to be
+        a main technical abstract.
+        """
+        WANTED = {"", "abstract"} # normal abstract
+        
         if not art: return None
+        
         cands = art.find_all("abstract", recursive=False)
+        if not cands: 
+            return None
+
         for a in cands:
             a_type = (a.get("abstract-type") or "").lower()
-            if a_type and a_type in BAD:
-                continue
-            return a
-        return cands[0] if cands else None
+            if a_type in WANTED:
+                return a # Found the best case, return it
 
+        return None  # No suitable abstract found
+    
     abs_el = pick_normal_abstract(art)
     if not abs_el:
         return ""
-        
+    
     # Find the top-level <title> of the abstract (if it exists)
     top_title = abs_el.find("title", recursive=False)
     if top_title:
@@ -528,11 +538,12 @@ def extract_abstract(art):
             top_title.decompose()
 
     # sanitize abstract structure
-    remove_figures_and_tables(abs_el) 
+    remove_figures_and_tables(abs_el)
     fix_glued_xrefs(abs_el)
-    dummy_title_set = set() 
+    dummy_title_set = set()
     all_blocks = _process_section_markdown(abs_el, 1, dummy_title_set)
     return "\n\n".join(all_blocks)
+
 
 
 # def extract_abstract(art):
@@ -562,7 +573,6 @@ def extract_abstract(art):
 #             if t:
 #                 paras.append(t)
 #     return "\n\n".join(paras)
-
 
 
 def extract_authors(art):
