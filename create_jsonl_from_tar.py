@@ -43,24 +43,35 @@ def clean(s: str) -> str:
     
     # This loop repeatedly applies the rules until the string
     # stops changing, fixing nested cases like "([[ref]])".
-    s_before = ""
+    s_before = None
     while s_before != s:
         s_before = s
 
-        # 1. Coalesce multiple [ref]s inside parentheses and replace the whole group.
-        # e.g., "([ref])" -> "[ref]"
-        # e.g., "([ref], [ref])" -> "[ref]"
-        # e.g., "( [ref] ; [ref] )" -> "[ref]"
-        s = re.sub(r"\(\s*\[ref\](?:\s*[,;]\s*\[ref\])*\s*\)", "[ref]", s)
-        
-        # 2. Same for square brackets
-        # e.g., "[[ref]]" -> "[ref]"
-        # e.g., "[[ref], [ref]]" -> "[ref]"
-        s = re.sub(r"\[\s*\[ref\](?:\s*[,;]\s*\[ref\])*\s*\]", "[ref]", s)
+        # 1) Any number of surrounding () or [] around a single [ref] -> [ref]
+        # e.g. "([ref])", "(([ref]))",  -> "[ref]"
+        # e.g. "[[ref]]", "[[[ref]]]"-> "[ref]"
+        s = re.sub(r'(?:\(\s*|\[\s*)+\[ref\](?:\s*\)|\s*\])+', "[ref]", s)
 
-    # 3. (Failsafe) Coalesce adjacent [ref]s that might have been left over
-    # e.g., "[ref], [ref]" -> "[ref]"
-    s = re.sub(r"\[ref\](?:\s*[,;]\s*\[ref\])+", "[ref]", s)
+        # 2) Lists of [ref] inside () separated by - – — , ;  -> [ref]
+        # e.g.  "( [ref] - [ref] )", "( [ref], [ref] )", "( [ref] ; [ref] )" → [ref]
+        s = re.sub(r'\(\s*\[ref\](?:\s*[-–—,;]\s*\[ref\])+\s*\)', "[ref]", s)
+
+        # 3) Lists of [ref] inside [] separated by - – — , ;  -> [ref]
+        #  e.g.  "[ [ref] - [ref] ]", "[ [ref], [ref] ]", "[ [ref] ; [ref] ]" → [ref]
+        s = re.sub(r'\[\s*\[ref\](?:\s*[-–—,;]\s*\[ref\])+\s*\]', "[ref]", s)
+
+        # 4) Lists of [ref] inside () separated only by spaces -> [ref]
+        # e.g. "( [ref]  [ref]  [ref] )" → [ref]
+        s = re.sub(r'\(\s*(?:\[ref\]\s*){2,}\)', "[ref]", s)
+
+        # 5) Lists of [ref] inside [] separated only by spaces -> [ref]
+        #  e.g.  "[ [ref]  [ref] ]" → [ref]
+        s = re.sub(r'\[\s*(?:\[ref\]\s*){2,}\]', "[ref]", s)
+
+    # 6) Failsafes OUTSIDE brackets/parentheses:
+    # e.g. "[ref] - [ref]", "[ref]; [ref]", "[ref] [ref]" → [ref]
+    s = re.sub(r'\[ref\](?:\s*[-–—,;]\s*\[ref\])+', "[ref]", s)
+    s = re.sub(r'\[ref\](?:\s+\[ref\])+', "[ref]", s)
 
     # Digit grouping commas: "1, 000" → "1,000"
     # Only if between digits (to avoid messing with lists)
@@ -253,6 +264,16 @@ def replace_citations_with_placeholder(soup_or_tag):
         if rt in CITATION_REFS:
             xr.replace_with("[ref]")
 
+def replace_math_with_placeholder(soup_or_tag):
+    """
+    Find all <inline-formula> and <disp-formula> tags
+    and replace them with the placeholder "[MATH]".
+    """
+    MATH_TAGS = ["inline-formula", "disp-formula"]
+    for tag_name in MATH_TAGS:
+        for math_el in soup_or_tag.find_all(tag_name):
+            math_el.replace_with("[MATH]")
+
 
 def fix_glued_xrefs(soup_or_tag):
     """
@@ -295,46 +316,6 @@ def fix_glued_xrefs(soup_or_tag):
 
                     # Update the sibling string to contain only what's left
                     ns.replace_with(remaining_text)
-
-
-# def _process_section_markdown(section_tag, level, kept_titles_set):
-#     """
-#     Recursive helper function to process a section (<sec>) and its children.
-#     Returns a list of Markdown-formatted text blocks.
-#     """
-#     content_blocks = []
-#     # Process direct children to maintain order
-#     for child in section_tag.children:
-#         if isinstance(child, NavigableString):
-#             continue  # Ignore strings that are just whitespace between tags
-
-#         tag_name = (child.name or "").lower()
-
-#         # Filter out unwanted sections before processing them
-#         if is_in_ignored_section(child):
-#             continue
-
-#         if tag_name == 'title':
-#             title_text = text_from(child)
-#             if title_text:
-#                 # Adds the title to the set ONLY if it's a main section title (level 1).
-#                 if level == 1:
-#                     kept_titles_set.add(title_text)
-
-#                 # Use the level to set the Markdown hashes (e.g., #, ##, ###)
-#                 content_blocks.append(f"{'#' * level} {title_text}")
-
-#         elif tag_name == 'p':
-#             if in_boundary_without_forbidden(child, "body"):
-#                 p_text = text_from(child)
-#                 if p_text:
-#                     content_blocks.append(p_text)
-        
-#         elif tag_name == 'sec':
-#             # Recursive call for the subsection, increasing the hierarchy level
-#             content_blocks.extend(_process_section_markdown(child, level + 1, kept_titles_set))
-
-#     return content_blocks
 
 
 # ---------- JATS pickers ----------
@@ -463,6 +444,7 @@ def extract_body_with_markdown(soup, kept_titles_set):
     # First, sanitize the structure within the body
     remove_figures_and_tables(body)
     replace_citations_with_placeholder(body)
+    replace_math_with_placeholder(body)
     fix_glued_xrefs(body)
 
     # Start the recursive processing from the body.
@@ -512,6 +494,7 @@ def extract_abstract(art):
     # sanitize abstract structure
     remove_figures_and_tables(abs_el)
     replace_citations_with_placeholder(abs_el)
+    replace_math_with_placeholder(abs_el)
     fix_glued_xrefs(abs_el)
     dummy_title_set = set()
     all_blocks = _process_section_markdown(abs_el, 1, dummy_title_set)
@@ -794,3 +777,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
