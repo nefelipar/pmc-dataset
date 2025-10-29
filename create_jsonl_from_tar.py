@@ -9,6 +9,7 @@ import urllib.request
 import gzip
 import json
 import re, html
+import argparse
 from bs4 import BeautifulSoup, NavigableString
 from unicodedata import normalize
 
@@ -41,6 +42,10 @@ def clean(s: str) -> str:
     # Don't leave space after opening brackets/quotes
     s = re.sub(r"([(\[\{«“‘])\s+", r"\1", s)
     
+    # Word separators and punctuation separators
+    SEP_WORDS = r"(?i:and\/or|and|or|&|\+)"
+    SEP = rf"(?:[-–—,;]|{SEP_WORDS})"
+
     # This loop repeatedly applies the rules until the string
     # stops changing, fixing nested cases like "([[ref]])".
     s_before = None
@@ -54,23 +59,23 @@ def clean(s: str) -> str:
 
         # 2) Lists of [ref] inside () separated by - – — , ;  -> [ref]
         # e.g.  "( [ref] - [ref] )", "( [ref], [ref] )", "( [ref] ; [ref] )" → [ref]
-        s = re.sub(r'\(\s*\[ref\](?:\s*[-–—,;]\s*\[ref\])+\s*\)', "[ref]", s)
+        s = re.sub(rf'(?:\(\s*)+\[ref\](?:\s*{SEP}\s*\[ref\])+(?:\s*\))+', "[ref]", s)
 
         # 3) Lists of [ref] inside [] separated by - – — , ;  -> [ref]
         #  e.g.  "[ [ref] - [ref] ]", "[ [ref], [ref] ]", "[ [ref] ; [ref] ]" → [ref]
-        s = re.sub(r'\[\s*\[ref\](?:\s*[-–—,;]\s*\[ref\])+\s*\]', "[ref]", s)
+        s = re.sub(rf'(?:\[\s*)+\[ref\](?:\s*{SEP}\s*\[ref\])+(?:\s*\])+', "[ref]", s)
 
         # 4) Lists of [ref] inside () separated only by spaces -> [ref]
         # e.g. "( [ref]  [ref]  [ref] )" → [ref]
-        s = re.sub(r'\(\s*(?:\[ref\]\s*){2,}\)', "[ref]", s)
+        s = re.sub(r'(?:\(\s*)+(?:\[ref\]\s*){2,}(?:\s*\))+', "[ref]", s)
 
         # 5) Lists of [ref] inside [] separated only by spaces -> [ref]
         #  e.g.  "[ [ref]  [ref] ]" → [ref]
-        s = re.sub(r'\[\s*(?:\[ref\]\s*){2,}\]', "[ref]", s)
+        s = re.sub(r'(?:\[\s*)+(?:\[ref\]\s*){2,}(?:\s*\])+', "[ref]", s)
 
     # 6) Failsafes OUTSIDE brackets/parentheses:
     # e.g. "[ref] - [ref]", "[ref]; [ref]", "[ref] [ref]" → [ref]
-    s = re.sub(r'\[ref\](?:\s*[-–—,;]\s*\[ref\])+', "[ref]", s)
+    s = re.sub(rf'\[ref\](?:\s*{SEP}\s*\[ref\])+', "[ref]", s)
     s = re.sub(r'\[ref\](?:\s+\[ref\])+', "[ref]", s)
 
     # Digit grouping commas: "1, 000" → "1,000"
@@ -226,7 +231,7 @@ def is_in_ignored_section(tag) -> bool:
             node_to_check = getattr(node_to_check, "parent", None)
             continue
 
-        if name in {"ack", "app-group", "app", "bio", "bios" ,"author-notes", "notes", "trans-abstract" ,"ref-list", "glossary", "fn-group"}:  
+        if name in {"ack", "app-group", "app", "bio", "bios" ,"author-notes", "notes", "trans-abstract" ,"ref-list", "glossary", "fn-group", "fn"}:  
             return True
         if name == "sec":
             # 1. Check for ignored section types
@@ -269,7 +274,7 @@ def replace_math_with_placeholder(soup_or_tag):
     Find all <inline-formula> and <disp-formula> tags
     and replace them with the placeholder "[MATH]".
     """
-    MATH_TAGS = ["inline-formula", "disp-formula"]
+    MATH_TAGS = ["inline-formula", "disp-formula", "math"]
     for tag_name in MATH_TAGS:
         for math_el in soup_or_tag.find_all(tag_name):
             math_el.replace_with("[MATH]")
@@ -282,7 +287,6 @@ def fix_glued_xrefs(soup_or_tag):
       (e.g., <xref>Fig 1</xref>A becomes <xref>Fig 1A</xref>)
       to prevent "Fig 1 A" during text extraction.
     """
-
     CONTENT_REFS = {"fig", "figure", "table", "tables", "app", "boxed-text"}
 
     for xr in soup_or_tag.find_all("xref"):
@@ -501,36 +505,6 @@ def extract_abstract(art):
     return "\n\n".join(all_blocks)
 
 
-
-# def extract_abstract(art):
-#     """Only normal abstracts, no graphical/teaser/etc; math → [MATH]; no tables/images."""
-#     def pick_normal_abstract(art):
-#         BAD = {"graphical","teaser","author-summary","editor-summary","lay-summary"}
-#         if not art: return None
-#         cands = art.find_all("abstract", recursive=False)
-#         for a in cands:
-#             a_type = (a.get("abstract-type") or "").lower()
-#             if a_type and a_type in BAD:
-#                 continue
-#             return a
-#         return cands[0] if cands else None
-
-#     abs_el = pick_normal_abstract(art)
-#     if not abs_el:
-#         return ""
-#     # sanitize abstract structure
-#     remove_figures_and_tables(abs_el)
-#     fix_glued_xrefs(abs_el)
-#     paras = []
-#     for p in abs_el.find_all("p"):
-#         # boundary-aware check
-#         if in_boundary_without_forbidden(p, "abstract"):
-#             t = text_from(p)
-#             if t:
-#                 paras.append(t)
-#     return "\n\n".join(paras)
-
-
 def extract_authors(art):
     """Authors with format "Given Names Surname" or "Collaboration Name"."""
     out, seen = [], set()
@@ -651,7 +625,74 @@ def build_record(xml_bytes: bytes, kept_titles_set: set, count_error_log_path: s
 
 
 
-def tar_to_jsonl(tar_path: str) -> str:
+# def tar_to_jsonl(tar_path: str) -> str:
+#     """ Convert a .tar.gz of JATS XML files to a single .jsonl.gz file.
+#     parsed = number of XML files parsed
+#     kept   = number of JSON records written
+#     skipped= number of XML files skipped (no pmc or errors)
+#     """
+#     base = os.path.basename(tar_path)
+#     prefix = os.path.splitext(os.path.splitext(base)[0])[0]  # drop .tar(.gz)
+#     out_path = os.path.join(OUT_DIR, f"{prefix}.jsonl.gz") # e.g. data/jsonl/oa_comm_xml.PMC012xxxxxx.baseline.2025-06-26.jsonl.gz
+#     log_path = os.path.join(LOG_DIR, f"{prefix}/missing_abstracts.log")
+#     count_error_log_path = os.path.join(LOG_DIR, f"{prefix}/error_count.log")
+    
+#     titles_log_path = os.path.join(LOG_DIR, f"{prefix}/kept_section_titles.log")
+    
+#     try:
+#         os.makedirs(os.path.dirname(titles_log_path), exist_ok=True)
+#     except Exception:
+#         pass
+
+#     parsed = kept = skipped = 0
+#     all_kept_titles = set()
+
+#     with tarfile.open(tar_path, "r:gz") as tf, gzip.open(out_path, "wt", encoding="utf-8") as fout:
+#         for m in tf.getmembers():
+#             if not m.isfile() or not (m.name or "").lower().endswith(".xml"):
+#                 continue
+#             f = tf.extractfile(m)
+#             if not f:
+#                 continue
+#             xml_bytes = f.read()
+#             parsed += 1
+#             try:
+#                 rec = build_record(xml_bytes, all_kept_titles, count_error_log_path=count_error_log_path)
+#                 # Log PMC IDs that lack an abstract
+#                 if not (rec.get("abstract") or "").strip():
+#                     try:
+#                         # os.makedirs(os.path.dirname(log_path), exist_ok=True)
+#                         with open(log_path, "a", encoding="utf-8") as lf:
+#                             title = (rec.get("metadata", {}).get("article_title") or "").replace("\n", " ")
+#                             lf.write(f"{rec.get('metadata',{}).get('pmc','')}\t{title}\n")
+#                     except Exception:
+#                         # Logging must not break the pipeline; ignore log I/O errors
+#                         pass
+#                 fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
+#                 kept += 1
+#             except Exception as e:
+#                 skipped += 1  # skip invalid XML or other errors
+#                 print(f"[ERROR] Skipped {m.name} due to error: {e}", file=sys.stderr)
+
+#     ## After processing is complete, write the collected titles to the log file.
+#     if all_kept_titles:
+#         print(f"[LOG] Writing {len(all_kept_titles)} unique kept titles to {titles_log_path}")
+#         try:
+#             # Sort titles alphabetically for easier review
+#             sorted_titles = sorted(list(all_kept_titles))
+#             with open(titles_log_path, "w", encoding="utf-8") as logf:
+#                 for title in sorted_titles:
+#                     logf.write(title + "\n")
+#         except Exception as e:
+#             print(f"[ERROR] Could not write titles log file: {e}", file=sys.stderr)
+
+
+#     print(f"[OK] {base}: parsed={parsed}, written={kept}, skipped={skipped}")
+#     print(f"[OUT] {out_path}")
+#     return out_path
+
+
+def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
     """ Convert a .tar.gz of JATS XML files to a single .jsonl.gz file.
     parsed = number of XML files parsed
     kept   = number of JSON records written
@@ -659,16 +700,17 @@ def tar_to_jsonl(tar_path: str) -> str:
     """
     base = os.path.basename(tar_path)
     prefix = os.path.splitext(os.path.splitext(base)[0])[0]  # drop .tar(.gz)
-    out_path = os.path.join(OUT_DIR, f"{prefix}.jsonl.gz") # e.g. data/jsonl/oa_comm_xml.PMC012xxxxxx.baseline.2025-06-26.jsonl.gz
-    log_path = os.path.join(LOG_DIR, f"{prefix}/missing_abstracts.log")
-    count_error_log_path = os.path.join(LOG_DIR, f"{prefix}/error_count.log")
     
-    titles_log_path = os.path.join(LOG_DIR, f"{prefix}/kept_section_titles.log")
+    # Use specified output directory and log directory 
+    out_path = os.path.join(out_dir, f"{prefix}.jsonl.gz") 
     
-    try:
-        os.makedirs(os.path.dirname(titles_log_path), exist_ok=True)
-    except Exception:
-        pass
+    # Create log subdirectory for this tarball
+    tar_log_dir = os.path.join(log_dir, prefix)
+    os.makedirs(tar_log_dir, exist_ok=True)
+    
+    log_path = os.path.join(tar_log_dir, "missing_abstracts.log")
+    count_error_log_path = os.path.join(tar_log_dir, "error_count.log")
+    titles_log_path = os.path.join(tar_log_dir, "kept_section_titles.log")
 
     parsed = kept = skipped = 0
     all_kept_titles = set()
@@ -687,7 +729,7 @@ def tar_to_jsonl(tar_path: str) -> str:
                 # Log PMC IDs that lack an abstract
                 if not (rec.get("abstract") or "").strip():
                     try:
-                        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                        # os.makedirs(os.path.dirname(log_path), exist_ok=True) # <-- Δεν χρειάζεται πια
                         with open(log_path, "a", encoding="utf-8") as lf:
                             title = (rec.get("metadata", {}).get("article_title") or "").replace("\n", " ")
                             lf.write(f"{rec.get('metadata',{}).get('pmc','')}\t{title}\n")
@@ -717,62 +759,142 @@ def tar_to_jsonl(tar_path: str) -> str:
     print(f"[OUT] {out_path}")
     return out_path
 
-
 # ---------- Download tarball & make JSONL ----------
-def download_tar(tar_name: str) -> str:
-    url = BASE_URL + tar_name
-    out = os.path.join(RAW_DIR, tar_name)
-    if not os.path.exists(out):
-        print(f"[download] {url}")
-        # Download to a temporary file to avoid corrupted files on interruption
-        tmp_out = out + ".tmp"
-        try:
-            urllib.request.urlretrieve(url, tmp_out)
-            os.rename(tmp_out, out)
-        except Exception as e:
-            print(f"[ERROR] Download failed: {e}", file=sys.stderr)
-            if os.path.exists(tmp_out):
-                os.remove(tmp_out)
-            sys.exit(1)
-    else:
-        print(f"[skip] already exists: {out}")
-    return out
+# def download_tar(tar_name: str) -> str:
+#     url = BASE_URL + tar_name
+#     out = os.path.join(RAW_DIR, tar_name)
+#     if not os.path.exists(out):
+#         print(f"[download] {url}")
+#         # Download to a temporary file to avoid corrupted files on interruption
+#         tmp_out = out + ".tmp"
+#         try:
+#             urllib.request.urlretrieve(url, tmp_out)
+#             os.rename(tmp_out, out)
+#         except Exception as e:
+#             print(f"[ERROR] Download failed: {e}", file=sys.stderr)
+#             if os.path.exists(tmp_out):
+#                 os.remove(tmp_out)
+#             sys.exit(1)
+#     else:
+#         print(f"[skip] already exists: {out}")
+#     return out
 
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage:")
-        print("python run.py <tar_name_or_url>  # e.g., oa_comm_xml.PMC012xxxxxx.baseline.2025-06-26.tar.gz")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Convert JATS XML tarball to JSONL.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
 
-    arg = sys.argv[1] # tar file name or full URL
-    tar_path = None
+    # --- Required Arguments ---
+    parser.add_argument(
+        "source",
+        type=str,
+        help="The .tar.gz file name (e.g., oa_comm_xml.PMC012xxxxxx.tar.gz) or the full URL to download it."
+    )
 
-    if arg.startswith("http"):
-        tar_name = os.path.basename(arg)
-        tar_path = os.path.join(RAW_DIR, tar_name)
-        if not os.path.exists(tar_path):
-            print(f"[download] {arg}")
-            tmp_path = tar_path + ".tmp"
-            try:
-                urllib.request.urlretrieve(arg, tmp_path)
-                os.rename(tmp_path, tar_path)
-            except Exception as e:
-                print(f"[ERROR] Download failed: {e}", file=sys.stderr)
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-                sys.exit(1)
+    # --- Optional Arguments for Directories---
+    parser.add_argument(
+        "--raw_dir",
+        type=str,
+        default=RAW_DIR,
+        help="Directory to save downloaded .tar.gz files."
+    )
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default=OUT_DIR,
+        help="Directory to save output .jsonl.gz files."
+    )
+    parser.add_argument(
+        "--log_dir",
+        type=str,
+        default=LOG_DIR,
+        help="Directory to save log files."
+    )
+
+    # --- Optional Flags ---
+    parser.add_argument(
+        "-f", "--force-download",
+        action="store_true",
+        help="Force re-download of the tarball even if it exists locally."
+    )
+
+    args = parser.parse_args()
+
+    # --- Setup Directories ---
+    os.makedirs(args.raw_dir, exist_ok=True)
+    os.makedirs(args.out_dir, exist_ok=True)
+    os.makedirs(args.log_dir, exist_ok=True)
+
+    # --- Main Logic ---
+    arg = args.source
+    tar_name = os.path.basename(arg)
+    tar_path = os.path.join(args.raw_dir, tar_name)
+
+    should_download = True
+    if os.path.exists(tar_path) and not args.force_download:
+        print(f"[skip] already exists: {tar_path}")
+        should_download = False
+
+    if should_download:
+        if arg.startswith("http"):
+            url = arg
         else:
-            print(f"[skip] already exists: {tar_path}")
-    else:
-        tar_path = download_tar(os.path.basename(arg))
+            url = BASE_URL + tar_name
 
-    if tar_path and os.path.exists(tar_path):
-        tar_to_jsonl(tar_path)
+        print(f"[download] {url}")
+        tmp_path = tar_path + ".tmp"
+        try:
+            urllib.request.urlretrieve(url, tmp_path)
+            os.rename(tmp_path, tar_path)
+        except Exception as e:
+            print(f"[ERROR] Download failed: {e}", file=sys.stderr)
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            sys.exit(1)
+    
+    # --- Process Logic ---
+    if os.path.exists(tar_path):
+        tar_to_jsonl(tar_path, args.out_dir, args.log_dir)
     else:
         print(f"[ERROR] Tar file not found at: {tar_path}", file=sys.stderr)
         sys.exit(1)
+
+
+    # if len(sys.argv) < 2:
+    #     print("Usage:")
+    #     print("python run.py <tar_name_or_url>  # e.g., oa_comm_xml.PMC012xxxxxx.baseline.2025-06-26.tar.gz")
+    #     sys.exit(1)
+
+    # arg = sys.argv[1] # tar file name or full URL
+    # tar_path = None
+
+    # if arg.startswith("http"):
+    #     tar_name = os.path.basename(arg)
+    #     tar_path = os.path.join(RAW_DIR, tar_name)
+    #     if not os.path.exists(tar_path):
+    #         print(f"[download] {arg}")
+    #         tmp_path = tar_path + ".tmp"
+    #         try:
+    #             urllib.request.urlretrieve(arg, tmp_path)
+    #             os.rename(tmp_path, tar_path)
+    #         except Exception as e:
+    #             print(f"[ERROR] Download failed: {e}", file=sys.stderr)
+    #             if os.path.exists(tmp_path):
+    #                 os.remove(tmp_path)
+    #             sys.exit(1)
+    #     else:
+    #         print(f"[skip] already exists: {tar_path}")
+    # else:
+    #     tar_path = download_tar(os.path.basename(arg))
+
+    # if tar_path and os.path.exists(tar_path):
+    #     tar_to_jsonl(tar_path)
+    # else:
+    #     print(f"[ERROR] Tar file not found at: {tar_path}", file=sys.stderr)
+    #     sys.exit(1)
 
 
 if __name__ == "__main__":
