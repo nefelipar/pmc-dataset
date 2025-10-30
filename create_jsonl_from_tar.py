@@ -92,6 +92,27 @@ def clean(s: str) -> str:
     # No spaces around '=' (x = 5 → x=5)
     s = re.sub(r"\s*=\s*", "=", s)
 
+    # --- Subscript/Superscript cleanup ---
+    # 1. Remove whitespace inside { ... }
+    # e.g. "^{ 3 }" -> "^{3}", "_{ max }" -> "_{max}"
+    s = re.sub(r'\{\s*([^}]*)\s*\}', r'{\1}', s)
+
+    # 2. Attach preceding letter/digit to following subscript/superscript tokens (_{...} or ^{...})
+    # e.g. "D _{3} KO" -> "D_{3} KO", "x ^{2}" -> "x^{2}"
+    s = re.sub(r'(?<=\w)\s+([_^]\{[^}]+\})', r'\1', s)
+
+    # 3. inside brackets/parentheses: don't leave spaces immediately after opening
+    # or before closing, so "[ ^{3} H ]" -> "[^{3}H]"
+    s = re.sub(r'\[\s+(?=[\w(_^])', '[', s)
+    s = re.sub(r'(?<=[\w})])\s+\]', ']', s)
+    s = re.sub(r'\(\s+(?=[\w(_^])', '(', s)
+    s = re.sub(r'(?<=[\w})])\s+\)', ')', s)
+
+    # 4. if followed by uppercase/punctuation, glue the token
+    # e.g. "D_{3} KO" (without space), "[^{3} H]" -> "[^{3}H]"
+    s = re.sub(r'([_^]\{[^}]+\})\s+(?=[A-Z\)\]\},\.;:!?])', r'\1', s)
+    # --- End Subscript/Superscript cleanup ---
+
     # whitespace cleanup again
     s = re.sub(r"\s{2,}", " ", s).strip()
 
@@ -279,6 +300,29 @@ def replace_math_with_placeholder(soup_or_tag):
         for math_el in soup_or_tag.find_all(tag_name):
             math_el.replace_with("[MATH]")
 
+def convert_inline_markup(soup_or_tag):
+    """
+    Converts <sup>, <sub> to caret/underscore and unwraps <italic>/<bold> etc.,
+    so that spaces are not inserted by get_text.
+    """
+    # superscripts: ^3
+    for sup in soup_or_tag.find_all('sup'):
+        txt = sup.get_text("", strip=True)
+        sup.replace_with(f"^{{{txt}}}")
+
+    # subscripts: _max
+    for sub in soup_or_tag.find_all('sub'):
+        txt = sub.get_text("", strip=True)
+        sub.replace_with(f"_{{{txt}}}")
+
+    # italics/bold/smallcaps -> plain text (or optionally add *…*)
+    for tag in soup_or_tag.find_all(['italic','i','em','bold','b','strong']):
+        tag.unwrap()
+
+    # smallcaps <sc> -> uppercase text
+    for sc in soup_or_tag.find_all('sc'):
+        sc.string = (sc.get_text("", strip=True) or "").upper()
+        sc.unwrap()
 
 def fix_glued_xrefs(soup_or_tag):
     """
@@ -450,7 +494,7 @@ def extract_body_with_markdown(soup, kept_titles_set):
     replace_citations_with_placeholder(body)
     replace_math_with_placeholder(body)
     fix_glued_xrefs(body)
-
+    convert_inline_markup(body)
     # Start the recursive processing from the body.
     # Initial call with level=0 makes main sections start with '#'.
     all_blocks = _process_section_markdown(body, 0, kept_titles_set)
@@ -500,6 +544,7 @@ def extract_abstract(art):
     replace_citations_with_placeholder(abs_el)
     replace_math_with_placeholder(abs_el)
     fix_glued_xrefs(abs_el)
+    convert_inline_markup(abs_el)
     dummy_title_set = set()
     all_blocks = _process_section_markdown(abs_el, 1, dummy_title_set)
     return "\n\n".join(all_blocks)
