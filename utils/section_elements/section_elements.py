@@ -98,6 +98,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional limit on number of archives to process (for quick sampling).",
     )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to write the report. Defaults to "
+            "`utils/section_elements/section_elements_report.txt`."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -116,6 +125,8 @@ def main() -> int:
     total_xml = 0
     all_errors: list[str] = []
 
+    report_lines: list[str] = []
+
     for archive_path in iter_tar_paths(source):
         if args.limit is not None and total_archives >= args.limit:
             break
@@ -124,26 +135,34 @@ def main() -> int:
         total_xml += processed
         all_errors.extend(errors)
 
-    print(f"Archives processed: {total_archives}")
-    print(f"XML files inspected: {total_xml}")
+    report_lines.append(f"Archives processed: {total_archives}")
+    report_lines.append(f"XML files inspected: {total_xml}")
     if all_errors:
-        print("Warnings:")
+        report_lines.append("Warnings:")
         for message in all_errors:
-            print(f"  - {message}")
+            report_lines.append(f"  - {message}")
 
     for section in sorted(TARGET_SECTIONS):
         counter = counters.get(section)
         if not counter:
-            print(f"\nNo elements found inside <{section}>.")
+            report_lines.append("")
+            report_lines.append(f"No elements found inside <{section}>.")
             continue
-        print(f"\nElements inside <{section}>:")
+        report_lines.append("")
+        report_lines.append(f"Elements inside <{section}>:")
         width = max(len(tag) for tag in counter)
         for tag, count in counter.most_common():
-            print(f"  {tag.ljust(width)}  {count}")
+            report_lines.append(f"  {tag.ljust(width)}  {count}")
+
+    report_text = "\n".join(report_lines)
+
+    default_output = Path(__file__).resolve().parent / "section_elements_report.txt"
+    output_path = args.output or default_output
+    output_path.write_text(report_text + "\n", encoding="utf-8")
+    print(f"\nReport written to {output_path}")
 
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

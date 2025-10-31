@@ -272,7 +272,7 @@ def is_in_ignored_section(tag) -> bool:
 
 def remove_figures_and_tables(soup_or_tag):
     """Remove figures and tables and their captions completely from the tree."""
-    for tname in ["fig", "figure", "graphic", "inline-graphic", "media", "table", "table-wrap"]:
+    for tname in ["fig", "figure", "graphic", "inline-graphic", "media", "table", "table-wrap", "table-wrap-foot", "chem-struct-wrap", "fig-group"]:
         for el in soup_or_tag.find_all(tname):
             el.decompose()
 
@@ -295,10 +295,19 @@ def replace_math_with_placeholder(soup_or_tag):
     Find all <inline-formula> and <disp-formula> tags
     and replace them with the placeholder "[MATH]".
     """
-    MATH_TAGS = ["inline-formula", "disp-formula", "math"]
+    MATH_TAGS = ["inline-formula", "disp-formula", "tex-math", "math"]
     for tag_name in MATH_TAGS:
         for math_el in soup_or_tag.find_all(tag_name):
             math_el.replace_with("[MATH]")
+
+def replace_code_with_placeholder(soup_or_tag):
+    """
+    Replace any <code> or <preformat> blocks with the placeholder "[CODE]".
+    This runs before inline markup conversion so inner content isn't processed.
+    """
+    for tag_name in ["code", "preformat"]:
+        for el in soup_or_tag.find_all(tag_name):
+            el.replace_with("[CODE]")
 
 def convert_inline_markup(soup_or_tag):
     """
@@ -323,6 +332,11 @@ def convert_inline_markup(soup_or_tag):
     for sc in soup_or_tag.find_all('sc'):
         sc.string = (sc.get_text("", strip=True) or "").upper()
         sc.unwrap()
+
+    # monospace -> `txt`
+    for mono in soup_or_tag.find_all('monospace'):
+        txt = mono.get_text("", strip=True)
+        mono.replace_with(f"`{txt}`")
 
 def fix_glued_xrefs(soup_or_tag):
     """
@@ -393,7 +407,7 @@ def _process_section_markdown(section_tag, level, kept_titles_set, blockquote_pr
                     kept_titles_set.add(title_text)
                 content_blocks.append(f"{blockquote_prefix}{'#' * level} {title_text}")
 
-        # --- CORRECTED 'p' HANDLER ---
+        # --- HANDLE paragraphs ---
         elif tag_name == 'p':
             # Check if this <p> tag contains other block-level elements (like <list>)
             # This is technically invalid JATS, but common in real-world XML.
@@ -418,7 +432,6 @@ def _process_section_markdown(section_tag, level, kept_titles_set, blockquote_pr
                 content_blocks.extend(
                     _process_section_markdown(child, level, kept_titles_set, blockquote_prefix)
                 )
-        # --- END 'p' HANDLER CORRECTION ---
 
         # --- Handle lists ---
         elif tag_name == 'list':
@@ -447,9 +460,8 @@ def _process_section_markdown(section_tag, level, kept_titles_set, blockquote_pr
             
             if list_items:
                 content_blocks.append("\n".join(list_items))
-        # --- END Handle lists ---
-
-        # --- NEW: Handle caption (for boxed-text) ---
+        
+        # --- Handle captions ---
         elif tag_name == 'caption':
             title_tag = child.find("title", recursive=False)
             if title_tag:
@@ -461,19 +473,29 @@ def _process_section_markdown(section_tag, level, kept_titles_set, blockquote_pr
                 p_text = text_from(p)
                 if p_text:
                     content_blocks.append(f"{blockquote_prefix}{p_text}")
-        # --- END Handle caption ---
 
-        # --- CORRECTED: Handle boxed-text ---
+        # --- Handle boxed-text ---
         elif tag_name == 'boxed-text':
-            box_content = _process_section_markdown(
-                child, level + 1, kept_titles_set, blockquote_prefix + "> "
-            )
-            content_blocks.extend(box_content)
-        # --- END Handle boxed-text ---
+            inner_blocks = _process_section_markdown(child, level + 1, kept_titles_set, blockquote_prefix + "> ")
+            if inner_blocks:
+                content_blocks.append(f"{blockquote_prefix}> ---")   # start rule at current depth
+                content_blocks.extend(inner_blocks)                   # box content 
+                content_blocks.append(f"{blockquote_prefix}> ---")   # end rule at current depth
 
+        # --- Handle display quotes ---
+        elif tag_name == 'disp-quote':
+            quote_blocks = _process_section_markdown(child, level, kept_titles_set, blockquote_prefix + "> ")
+            content_blocks.extend(quote_blocks)
+
+        # --- Handle nested sections ---
         elif tag_name == 'sec':
             content_blocks.extend(_process_section_markdown(child, level + 1, kept_titles_set, blockquote_prefix))
 
+        # --- Handle breaks ---
+        elif tag_name in ('break'):
+            # emit a blank line at current blockquote depth
+            content_blocks.append(f"{blockquote_prefix}")
+    
     # Return only blocks that actually have content
     # We join blocks with \n\n in the parent function (extract_body_with_markdown)
     return [block for block in content_blocks if block.strip()]
@@ -493,6 +515,7 @@ def extract_body_with_markdown(soup, kept_titles_set):
     remove_figures_and_tables(body)
     replace_citations_with_placeholder(body)
     replace_math_with_placeholder(body)
+    replace_code_with_placeholder(body)
     fix_glued_xrefs(body)
     convert_inline_markup(body)
     # Start the recursive processing from the body.
@@ -543,6 +566,7 @@ def extract_abstract(art):
     remove_figures_and_tables(abs_el)
     replace_citations_with_placeholder(abs_el)
     replace_math_with_placeholder(abs_el)
+    replace_code_with_placeholder(abs_el)
     fix_glued_xrefs(abs_el)
     convert_inline_markup(abs_el)
     dummy_title_set = set()
