@@ -18,6 +18,14 @@ RAW_DIR  = "data/tar"     # save .tar.gz
 OUT_DIR  = "data/jsonl"   # save .jsonl.gz
 LOG_DIR  = "data/logs"    # logs (e.g., missing abstracts)
 
+# Containers we don't want any text from (drop completely)
+FORBIDDEN_CONTAINER_TAGS = {
+    "fig", "figure", "fig-group",
+    "graphic", "inline-graphic", "media",
+    "table", "table-wrap", "table-wrap-foot",
+    "chem-struct-wrap",
+    "array"}
+
 os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -158,7 +166,7 @@ def in_boundary_without_forbidden(tag, boundary_name: str) -> bool:
         if not name:
             p = getattr(p, "parent", None)
             continue
-        if name in {"table", "table-wrap", "fig", "figure", "graphic", "inline-graphic", "media"}:
+        if name in FORBIDDEN_CONTAINER_TAGS:
             return False
         if name == boundary_name:
             return True
@@ -272,7 +280,7 @@ def is_in_ignored_section(tag) -> bool:
 
 def remove_figures_and_tables(soup_or_tag):
     """Remove figures and tables and their captions completely from the tree."""
-    for tname in ["fig", "figure", "graphic", "inline-graphic", "media", "table", "table-wrap", "table-wrap-foot", "chem-struct-wrap", "fig-group"]:
+    for tname in FORBIDDEN_CONTAINER_TAGS:
         for el in soup_or_tag.find_all(tname):
             el.decompose()
 
@@ -492,7 +500,7 @@ def _process_section_markdown(section_tag, level, kept_titles_set, blockquote_pr
             content_blocks.extend(_process_section_markdown(child, level + 1, kept_titles_set, blockquote_prefix))
 
         # --- Handle breaks ---
-        elif tag_name in ('break'):
+        elif tag_name == 'break':
             # emit a blank line at current blockquote depth
             content_blocks.append(f"{blockquote_prefix}")
     
@@ -597,9 +605,13 @@ def get_article_meta(soup):
     front = soup.find("front")
     return front.find("article-meta") if front else None
 
+def get_article_type(soup) -> str:
+    art = soup.find("article")
+    return ((art.get("article-type") or "") if art else "").strip().lower()
+
 def get_journal_meta(soup):
     front = soup.find("front")
-    return front.find("journal-meta") if front else None
+    return front.find("journal-meta") if front else None    
 
 def article_id(art, kind: str):
     """ Take article-id of given kind (pmcid, pmid, doi) """
@@ -610,13 +622,16 @@ def article_id(art, kind: str):
 
 def extract_metadata(soup):
     """metadata: pmid, doi, article_title, journal_title, epub, authors[]"""
-    art = get_article_meta(soup); jmeta = get_journal_meta(soup)
+    art = get_article_meta(soup); 
+    jmeta = get_journal_meta(soup)
+    
     pmc  = article_id(art, "pmcid") or article_id(art, "pmc")
     pmid = article_id(art, "pmid")
     doi  = article_id(art, "doi")
 
     atitle = art.select_one("title-group > article-title") if art else None
     jtitle = jmeta.select_one("journal-title-group > journal-title") if jmeta else None
+    article_type = get_article_type(soup)
 
     # epub YYYY[-MM[-DD]]
     epub = None
@@ -637,7 +652,8 @@ def extract_metadata(soup):
         "article_title": clean(atitle.get_text(" ", strip=True)) if atitle else "",
         "journal_title": clean(jtitle.get_text(" ", strip=True)) if jtitle else "",
         "epub": epub,
-        "authors": authors
+        "authors": authors,
+        "article_type": article_type
     }
     return pmc, meta
 

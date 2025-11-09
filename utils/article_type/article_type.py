@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 
 DEFAULT_SOURCE = Path("data/tar/PMC000xxxxxx")
 UNTYPED_LABEL = "untyped"
+REPORT_PATH = Path(__file__).resolve().parent / "article_type_report.txt"
 
 
 def _strip_namespace(tag: str) -> str:
@@ -92,6 +93,13 @@ def _process_tar(path: Path, counter: Counter[str]) -> Tuple[int, list[str]]:
     return processed, errors
 
 
+def _write_report(output: str) -> Path:
+    if not output.endswith("\n"):
+        output = f"{output}\n"
+    REPORT_PATH.write_text(output, encoding="utf-8")
+    return REPORT_PATH
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Collect article-type values used in PMC XML files."
@@ -133,21 +141,26 @@ def main() -> int:
             print(f"  - {message}", file=sys.stderr)
 
     total_articles = sum(counter.values())
-    print(f"XML files with article-type: {processed}")
-    print(f"Unique article-type values: {len(counter)}")
+    output_lines = [
+        f"XML files with article-type: {processed}",
+        f"Unique article-type values: {len(counter)}",
+    ]
 
-    if not counter:
-        return 0
+    if counter:
+        width = max(len(label) for label in counter)
+        output_lines.append("")
+        output_lines.append("article-type".ljust(width + 2) + "count    share")
+        for article_type, count in counter.most_common():
+            share = (count / total_articles * 100) if total_articles else 0.0
+            output_lines.append(f"{article_type.ljust(width + 2)}{count:>5}  {share:6.2f}%")
 
-    width = max(len(label) for label in counter)
-    print("\narticle-type".ljust(width + 2) + "count    share")
-    for article_type, count in counter.most_common():
-        share = (count / total_articles * 100) if total_articles else 0.0
-        print(f"{article_type.ljust(width + 2)}{count:>5}  {share:6.2f}%")
+    output_text = "\n".join(output_lines)
+    # print(output_text)
+    report_path = _write_report(output_text)
+    print(f"Report saved to {report_path}")
 
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
-
