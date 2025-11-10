@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# pip install beautifulsoup4 lxml
+# pip install beautifulsoup4 lxml nltk
 
 import os
 import re
@@ -24,7 +24,7 @@ FORBIDDEN_CONTAINER_TAGS = {
     "graphic", "inline-graphic", "media",
     "table", "table-wrap", "table-wrap-foot",
     "chem-struct-wrap",
-    "array"}
+    "array", "supplementary-material"}
 
 os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(OUT_DIR, exist_ok=True)
