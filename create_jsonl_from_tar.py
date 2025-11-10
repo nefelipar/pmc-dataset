@@ -94,7 +94,7 @@ def clean(s: str) -> str:
     # Do not touch cases like "17- and"
     s = re.sub(r"(?<=[A-Za-z])\s*-\s*(?=[A-Za-z])", "-", s)
 
-    # Range of numbers with en dash: "2000 – 2021" → "2000–2021"
+    # Remove spaces around en dash when it appears between digits: "2000 – 2021" → "2000–2021"
     s = re.sub(r"(?<=\d)\s*–\s*(?=\d)", "–", s)
 
     # No spaces around '=' ("x = 5" → "x=5")
@@ -155,9 +155,10 @@ def count_words(text: str) -> int:
 
 
 def in_boundary_without_forbidden(tag, boundary_name: str) -> bool:
-    """ Check if `tag` is within a boundary (e.g. "body", "abstract")
-        but not inside tables, figures/images or table-wraps.
-        If boundary_name is None or empty, just check not in table/table-wrap.
+    """ 
+    If boundary_name is provided, ensure the tag is inside that boundary and not
+    inside a forbidden container. If boundary_name is None/empty, only enforce
+    that it's not inside a forbidden container.
     """
     p = getattr(tag, "parent", None)
     boundary_name = (boundary_name or "").lower()
@@ -804,8 +805,9 @@ def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
                 if not (rec.get("abstract") or "").strip():
                     try:
                         with open(log_path, "a", encoding="utf-8") as lf:
+                            pmcid = rec.get("pmcid") or rec.get("metadata", {}).get("pmc", "")
                             title = (rec.get("metadata", {}).get("article_title") or "").replace("\n", " ")
-                            lf.write(f"{rec.get('metadata',{}).get('pmc','')}\t{title}\n")
+                            lf.write(f"{pmcid}\t{title}\n")
                     except Exception:
                         # Logging must not break the pipeline; ignore log I/O errors
                         pass
