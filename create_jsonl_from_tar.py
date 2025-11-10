@@ -39,15 +39,15 @@ def clean(s: str) -> str:
     s = normalize("NFC", s) # Normalize to unicode
 
     # Compress whitespace (spaces, tabs, newlines) to single space
-    s = re.sub(r"[ \t\r\f\v]+", " ", s).strip()
+    s = re.sub(r"[\s]+", " ", s).strip()
 
     # Remove spaces before punctuation (e.g. gene , name → gene, name)
     s = re.sub(r"\s+([,.;:!?%])", r"\1", s)
 
-    # Don't leave space before closing brackets/quotes
+    # Don't leave space before closing brackets/quotes (e.g. "(text )" → "(text)")
     s = re.sub(r"\s+([)\]\}»”’])", r"\1", s)
 
-    # Don't leave space after opening brackets/quotes
+    # Don't leave space after opening brackets/quotes (e.g. "( text)" → "(text)")
     s = re.sub(r"([(\[\{«“‘])\s+", r"\1", s)
     
     # Word separators and punctuation separators
@@ -97,7 +97,7 @@ def clean(s: str) -> str:
     # Range of numbers with en dash: "2000 – 2021" → "2000–2021"
     s = re.sub(r"(?<=\d)\s*–\s*(?=\d)", "–", s)
 
-    # No spaces around '=' (x = 5 → x=5)
+    # No spaces around '=' ("x = 5" → "x=5")
     s = re.sub(r"\s*=\s*", "=", s)
 
     # --- Subscript/Superscript cleanup ---
@@ -495,14 +495,71 @@ def _process_section_markdown(section_tag, level, kept_titles_set, blockquote_pr
             quote_blocks = _process_section_markdown(child, level, kept_titles_set, blockquote_prefix + "> ")
             content_blocks.extend(quote_blocks)
 
+        # --- Handle statements ---
+        elif tag_name == 'statement':
+            new_prefix = blockquote_prefix + "> "
+            
+            label_tag = child.find("label", recursive=False)
+            if not label_tag:
+                label_tag = child.find("title", recursive=False)
+            
+            label_str = ""
+            if label_tag:
+                label_text = text_from(label_tag)
+                if label_text:
+                    label_str = f"**{label_text}**"
+                label_tag.decompose()
+
+            # find the first <p> child (if any)
+            first_p = child.find("p", recursive=False)
+            
+            if label_str and first_p:
+                # Stick label and first paragraph together
+                p_text = text_from(first_p)
+                content_blocks.append(f"{new_prefix}{label_str} {p_text}")
+                first_p.decompose()
+            elif label_str:
+                # No <p> found, just add the label on its own
+                content_blocks.append(f"{new_prefix}{label_str}")
+
+            # Process remaining content
+            inner_blocks = _process_section_markdown(child, level, kept_titles_set, new_prefix)
+            content_blocks.extend(inner_blocks)
+
+        # --- Handle speeches ---
+        elif tag_name == 'speech':
+            new_prefix = blockquote_prefix + "> "
+
+            speaker_tag = child.find("speaker", recursive=False)
+            speaker_str = ""
+            if speaker_tag:
+                speaker_text = text_from(speaker_tag)
+                if speaker_text.endswith(':'):
+                    speaker_text = speaker_text[:-1].strip()
+                if speaker_text:
+                    speaker_str = f"**{speaker_text}:**"
+                speaker_tag.decompose()
+
+            # find the first <p> child (if any)
+            first_p = child.find("p", recursive=False)
+            
+            if speaker_str and first_p:
+                # Stick speaker and first paragraph together
+                p_text = text_from(first_p)
+                content_blocks.append(f"{new_prefix}{speaker_str} {p_text}")
+                first_p.decompose() 
+            elif speaker_str:
+                # No <p> found, just add the speaker on its own
+                content_blocks.append(f"{new_prefix}{speaker_str}")
+
+            # Process remaining content
+            inner_blocks = _process_section_markdown(child, level, kept_titles_set, new_prefix)
+            content_blocks.extend(inner_blocks)
+
+
         # --- Handle nested sections ---
         elif tag_name == 'sec':
             content_blocks.extend(_process_section_markdown(child, level + 1, kept_titles_set, blockquote_prefix))
-
-        # --- Handle breaks ---
-        elif tag_name == 'break':
-            # emit a blank line at current blockquote depth
-            content_blocks.append(f"{blockquote_prefix}")
     
     # Return only blocks that actually have content
     # We join blocks with \n\n in the parent function (extract_body_with_markdown)
@@ -625,7 +682,7 @@ def extract_metadata(soup):
     art = get_article_meta(soup); 
     jmeta = get_journal_meta(soup)
     
-    pmc  = article_id(art, "pmcid") or article_id(art, "pmc")
+    pmc  = article_id(art, "pmcid") or article_id(art, "pmc") 
     pmid = article_id(art, "pmid")
     doi  = article_id(art, "doi")
 
@@ -668,8 +725,8 @@ def build_record(xml_bytes: bytes, kept_titles_set: set, count_error_log_path: s
     soup = BeautifulSoup(xml_bytes, "lxml-xml")
     pmc, metadata = extract_metadata(soup)
 
-    if pmc:
-        metadata["pmc"] = pmc
+    # if pmc:
+    #     metadata["pmc"] = pmc
 
     # 1. Extract abstract.
     abstract = extract_abstract(get_article_meta(soup))
@@ -706,75 +763,7 @@ def build_record(xml_bytes: bytes, kept_titles_set: set, count_error_log_path: s
             except Exception:
                 pass
 
-    return {"abstract": abstract, "text": text, "metadata": metadata}
-
-
-
-# def tar_to_jsonl(tar_path: str) -> str:
-#     """ Convert a .tar.gz of JATS XML files to a single .jsonl.gz file.
-#     parsed = number of XML files parsed
-#     kept   = number of JSON records written
-#     skipped= number of XML files skipped (no pmc or errors)
-#     """
-#     base = os.path.basename(tar_path)
-#     prefix = os.path.splitext(os.path.splitext(base)[0])[0]  # drop .tar(.gz)
-#     out_path = os.path.join(OUT_DIR, f"{prefix}.jsonl.gz") # e.g. data/jsonl/oa_comm_xml.PMC012xxxxxx.baseline.2025-06-26.jsonl.gz
-#     log_path = os.path.join(LOG_DIR, f"{prefix}/missing_abstracts.log")
-#     count_error_log_path = os.path.join(LOG_DIR, f"{prefix}/error_count.log")
-    
-#     titles_log_path = os.path.join(LOG_DIR, f"{prefix}/kept_section_titles.log")
-    
-#     try:
-#         os.makedirs(os.path.dirname(titles_log_path), exist_ok=True)
-#     except Exception:
-#         pass
-
-#     parsed = kept = skipped = 0
-#     all_kept_titles = set()
-
-#     with tarfile.open(tar_path, "r:gz") as tf, gzip.open(out_path, "wt", encoding="utf-8") as fout:
-#         for m in tf.getmembers():
-#             if not m.isfile() or not (m.name or "").lower().endswith(".xml"):
-#                 continue
-#             f = tf.extractfile(m)
-#             if not f:
-#                 continue
-#             xml_bytes = f.read()
-#             parsed += 1
-#             try:
-#                 rec = build_record(xml_bytes, all_kept_titles, count_error_log_path=count_error_log_path)
-#                 # Log PMC IDs that lack an abstract
-#                 if not (rec.get("abstract") or "").strip():
-#                     try:
-#                         # os.makedirs(os.path.dirname(log_path), exist_ok=True)
-#                         with open(log_path, "a", encoding="utf-8") as lf:
-#                             title = (rec.get("metadata", {}).get("article_title") or "").replace("\n", " ")
-#                             lf.write(f"{rec.get('metadata',{}).get('pmc','')}\t{title}\n")
-#                     except Exception:
-#                         # Logging must not break the pipeline; ignore log I/O errors
-#                         pass
-#                 fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
-#                 kept += 1
-#             except Exception as e:
-#                 skipped += 1  # skip invalid XML or other errors
-#                 print(f"[ERROR] Skipped {m.name} due to error: {e}", file=sys.stderr)
-
-#     ## After processing is complete, write the collected titles to the log file.
-#     if all_kept_titles:
-#         print(f"[LOG] Writing {len(all_kept_titles)} unique kept titles to {titles_log_path}")
-#         try:
-#             # Sort titles alphabetically for easier review
-#             sorted_titles = sorted(list(all_kept_titles))
-#             with open(titles_log_path, "w", encoding="utf-8") as logf:
-#                 for title in sorted_titles:
-#                     logf.write(title + "\n")
-#         except Exception as e:
-#             print(f"[ERROR] Could not write titles log file: {e}", file=sys.stderr)
-
-
-#     print(f"[OK] {base}: parsed={parsed}, written={kept}, skipped={skipped}")
-#     print(f"[OUT] {out_path}")
-#     return out_path
+    return {"pmcid": pmc ,"abstract": abstract, "text": text, "metadata": metadata}
 
 
 def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
@@ -814,7 +803,6 @@ def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
                 # Log PMC IDs that lack an abstract
                 if not (rec.get("abstract") or "").strip():
                     try:
-                        # os.makedirs(os.path.dirname(log_path), exist_ok=True) # <-- Δεν χρειάζεται πια
                         with open(log_path, "a", encoding="utf-8") as lf:
                             title = (rec.get("metadata", {}).get("article_title") or "").replace("\n", " ")
                             lf.write(f"{rec.get('metadata',{}).get('pmc','')}\t{title}\n")
@@ -843,27 +831,6 @@ def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
     print(f"[OK] {base}: parsed={parsed}, written={kept}, skipped={skipped}")
     print(f"[OUT] {out_path}")
     return out_path
-
-# ---------- Download tarball & make JSONL ----------
-# def download_tar(tar_name: str) -> str:
-#     url = BASE_URL + tar_name
-#     out = os.path.join(RAW_DIR, tar_name)
-#     if not os.path.exists(out):
-#         print(f"[download] {url}")
-#         # Download to a temporary file to avoid corrupted files on interruption
-#         tmp_out = out + ".tmp"
-#         try:
-#             urllib.request.urlretrieve(url, tmp_out)
-#             os.rename(tmp_out, out)
-#         except Exception as e:
-#             print(f"[ERROR] Download failed: {e}", file=sys.stderr)
-#             if os.path.exists(tmp_out):
-#                 os.remove(tmp_out)
-#             sys.exit(1)
-#     else:
-#         print(f"[skip] already exists: {out}")
-#     return out
-
 
 
 def main():
@@ -946,41 +913,6 @@ def main():
     else:
         print(f"[ERROR] Tar file not found at: {tar_path}", file=sys.stderr)
         sys.exit(1)
-
-
-    # if len(sys.argv) < 2:
-    #     print("Usage:")
-    #     print("python run.py <tar_name_or_url>  # e.g., oa_comm_xml.PMC012xxxxxx.baseline.2025-06-26.tar.gz")
-    #     sys.exit(1)
-
-    # arg = sys.argv[1] # tar file name or full URL
-    # tar_path = None
-
-    # if arg.startswith("http"):
-    #     tar_name = os.path.basename(arg)
-    #     tar_path = os.path.join(RAW_DIR, tar_name)
-    #     if not os.path.exists(tar_path):
-    #         print(f"[download] {arg}")
-    #         tmp_path = tar_path + ".tmp"
-    #         try:
-    #             urllib.request.urlretrieve(arg, tmp_path)
-    #             os.rename(tmp_path, tar_path)
-    #         except Exception as e:
-    #             print(f"[ERROR] Download failed: {e}", file=sys.stderr)
-    #             if os.path.exists(tmp_path):
-    #                 os.remove(tmp_path)
-    #             sys.exit(1)
-    #     else:
-    #         print(f"[skip] already exists: {tar_path}")
-    # else:
-    #     tar_path = download_tar(os.path.basename(arg))
-
-    # if tar_path and os.path.exists(tar_path):
-    #     tar_to_jsonl(tar_path)
-    # else:
-    #     print(f"[ERROR] Tar file not found at: {tar_path}", file=sys.stderr)
-    #     sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

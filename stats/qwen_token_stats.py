@@ -3,7 +3,7 @@
 Compute dataset statistics using a Qwen tokenizer.
 
 For each `*.jsonl.gz` file under the target directory the script reports:
-- total records, missing text, missing abstract
+- total records, missing text, missing abstract, missing PMCID
 - token statistics (min/mean/median/max/percentiles) for input text and abstracts
 - character-length statistics (helpful for sanity checks)
 - ratios between abstract and text lengths (tokens & characters)
@@ -165,6 +165,7 @@ def collect_file_stats(
     total = 0
     missing_text = 0
     missing_abstract = 0
+    missing_pmcid = 0
     json_errors = 0
 
     text_tokens: List[int] = []
@@ -191,6 +192,7 @@ def collect_file_stats(
 
             text_val = record.get("text")
             abstract_val = record.get("abstract")
+            pmcid_val = record.get("pmcid")
 
             if is_missing(text_val):
                 missing_text += 1
@@ -213,6 +215,9 @@ def collect_file_stats(
                 )
                 abstract_tokens.append(len(tokenised_abs))
                 abstract_chars.append(len(abstract_val))
+
+            if is_missing(pmcid_val):
+                missing_pmcid += 1
 
             if (
                 not is_missing(text_val)
@@ -239,6 +244,7 @@ def collect_file_stats(
         "total_records": total,
         "missing_text": missing_text,
         "missing_abstract": missing_abstract,
+        "missing_pmcid": missing_pmcid,
         "json_errors": json_errors,
         "text_token_stats": summarise(text_tokens),
         "abstract_token_stats": summarise(abstract_tokens),
@@ -309,6 +315,7 @@ def run_analysis(
     total_records = 0
     missing_text = 0
     missing_abstract = 0
+    missing_pmcid = 0
     json_errors = 0
 
     for path in paths:
@@ -325,12 +332,14 @@ def run_analysis(
         total_records += file_summary["total_records"]  # type: ignore[arg-type]
         missing_text += file_summary["missing_text"]  # type: ignore[arg-type]
         missing_abstract += file_summary["missing_abstract"]  # type: ignore[arg-type]
+        missing_pmcid += file_summary["missing_pmcid"]  # type: ignore[arg-type]
         json_errors += file_summary["json_errors"]  # type: ignore[arg-type]
 
     overall = {
         "total_records": total_records,
         "missing_text": missing_text,
         "missing_abstract": missing_abstract,
+        "missing_pmcid": missing_pmcid,
         "json_errors": json_errors,
         "text_token_stats": summarise(overall_buckets.text_tokens),
         "abstract_token_stats": summarise(overall_buckets.abstract_tokens),
