@@ -358,7 +358,7 @@ def fix_glued_xrefs(soup_or_tag):
       (e.g., <xref>Fig 1</xref>A becomes <xref>Fig 1A</xref>)
       to prevent "Fig 1 A" during text extraction.
     """
-    CONTENT_REFS = {"fig", "fig-group", "table", "table-fn", "table-wrap", "table-wrap-group", "app", "boxed-text", "supplementary-material"}
+    CONTENT_REFS = {"fig", "table", "table-fn", "app", "boxed-text", "supplementary-material"}
 
     for xr in soup_or_tag.find_all("xref"):
         rt = (xr.get("ref-type") or "").lower()
@@ -403,10 +403,7 @@ def replace_content_refs_with_placeholders(soup_or_tag):
     """
     placeholder_map = {
         "fig": "[FIG_REF]",
-        "fig-group": "[FIG_REF]",
         "table": "[TAB_REF]",
-        "table-wrap": "[TAB_REF]",
-        "table-wrap-group": "[TAB_REF]",
         "table-fn": "[TAB_REF]",
         "app": "[APP_REF]",
         "boxed-text": "[BOX_REF]",
