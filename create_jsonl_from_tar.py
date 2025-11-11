@@ -8,7 +8,7 @@ import tarfile
 import urllib.request
 import gzip
 import json
-import re, html
+import html
 import argparse
 from bs4 import BeautifulSoup, NavigableString
 from unicodedata import normalize
