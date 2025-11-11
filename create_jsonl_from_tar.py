@@ -50,41 +50,45 @@ def clean(s: str) -> str:
     # Don't leave space after opening brackets/quotes (e.g. "( text)" → "(text)")
     s = re.sub(r"([(\[\{«“‘])\s+", r"\1", s)
     
-    # Word separators and punctuation separators
+
+    # --- Normalization placeholders ---
+    PLACEHOLDERS = ["CIT_REF","FIG_REF","TAB_REF","APP_REF","BOX_REF","SUP_REF"]
     SEP_WORDS = r"(?i:and\/or|and|or|&|\+)"
     SEP = rf"(?:[-–—,;]|{SEP_WORDS})"
 
     # This loop repeatedly applies the rules until the string
-    # stops changing, fixing nested cases like "([[ref]])".
+    # stops changing, fixing nested cases like "([[CIT_REF]])".
     s_before = None
     while s_before != s:
         s_before = s
 
-        # 1) Any number of surrounding () or [] around a single [ref] -> [ref]
-        # e.g. "([ref])", "(([ref]))",  -> "[ref]"
-        # e.g. "[[ref]]", "[[[ref]]]"-> "[ref]"
-        s = re.sub(r'(?:\(\s*|\[\s*)+\[ref\](?:\s*\)|\s*\])+', "[ref]", s)
+        for PH in PLACEHOLDERS:
+            # 1) Any number of surrounding () or [] around a single placeholder -> same placeholder
+            # e.g. "([CIT_REF])", "(([CIT_REF]))",  -> "[CIT_REF]"
+            # e.g. "[[CIT_REF]]", "[[[CIT_REF]]]"-> "[CIT_REF]"
+            s = re.sub(rf'(?:\(\s*|\[\s*)+\[{PH}\](?:\s*\)|\s*\])+', f'[{PH}]', s)
 
-        # 2) Lists of [ref] inside () separated by - – — , ;  -> [ref]
-        # e.g.  "( [ref] - [ref] )", "( [ref], [ref] )", "( [ref] ; [ref] )" → [ref]
-        s = re.sub(rf'(?:\(\s*)+\[ref\](?:\s*{SEP}\s*\[ref\])+(?:\s*\))+', "[ref]", s)
+            # 2) Lists of same placeholders inside () separated by - – — , ;  -> one placeholder
+            # e.g.  "( [CIT_REF] - [CIT_REF] )", "( [CIT_REF], [CIT_REF] )", "( [CIT_REF] ; [CIT_REF] )" → [CIT_REF]
+            s = re.sub(rf'(?:\(\s*)+\[{PH}\](?:\s*{SEP}\s*\[{PH}\])+(?:\s*\))+', f'[{PH}]', s)
 
-        # 3) Lists of [ref] inside [] separated by - – — , ;  -> [ref]
-        #  e.g.  "[ [ref] - [ref] ]", "[ [ref], [ref] ]", "[ [ref] ; [ref] ]" → [ref]
-        s = re.sub(rf'(?:\[\s*)+\[ref\](?:\s*{SEP}\s*\[ref\])+(?:\s*\])+', "[ref]", s)
+            # 3) Lists of same placeholders inside [] separated by - – — , ;  -> one placeholder
+            #  e.g.  "[ [CIT_REF] - [CIT_REF] ]", "[ [CIT_REF], [CIT_REF] ]", "[ [CIT_REF] ; [CIT_REF] ]" → [CIT_REF]
+            s = re.sub(rf'(?:\[\s*)+\[{PH}\](?:\s*{SEP}\s*\[{PH}\])+(?:\s*\])+', f'[{PH}]', s)
 
-        # 4) Lists of [ref] inside () separated only by spaces -> [ref]
-        # e.g. "( [ref]  [ref]  [ref] )" → [ref]
-        s = re.sub(r'(?:\(\s*)+(?:\[ref\]\s*){2,}(?:\s*\))+', "[ref]", s)
+            # 4) Lists of same placeholders inside () separated only by spaces -> one placeholder
+            # e.g. "( [CIT_REF]  [CIT_REF]  [CIT_REF] )" → [CIT_REF]
+            s = re.sub(rf'(?:\(\s*)+(?:\[{PH}\]\s*){{2,}}(?:\s*\))+', f'[{PH}]', s)
 
-        # 5) Lists of [ref] inside [] separated only by spaces -> [ref]
-        #  e.g.  "[ [ref]  [ref] ]" → [ref]
-        s = re.sub(r'(?:\[\s*)+(?:\[ref\]\s*){2,}(?:\s*\])+', "[ref]", s)
+            # 5) Lists of same placeholders inside [] separated only by spaces -> one placeholder
+            #  e.g.  "[ [CIT_REF]  [CIT_REF] ]" → [CIT_REF]
+            s = re.sub(rf'(?:\[\s*)+(?:\[{PH}\]\s*){{2,}}(?:\s*\])+', f'[{PH}]', s)
 
-    # 6) Failsafes OUTSIDE brackets/parentheses:
-    # e.g. "[ref] - [ref]", "[ref]; [ref]", "[ref] [ref]" → [ref]
-    s = re.sub(rf'\[ref\](?:\s*{SEP}\s*\[ref\])+', "[ref]", s)
-    s = re.sub(r'\[ref\](?:\s+\[ref\])+', "[ref]", s)
+        # 6) Failsafes OUTSIDE brackets/parentheses:
+        # e.g. "[CIT_REF] - [CIT_REF]", "[CIT_REF]; [CIT_REF]", "[CIT_REF] [CIT_REF]" → [CIT_REF]
+        for PH in PLACEHOLDERS:
+            s = re.sub(rf'\[{PH}\](?:\s*{SEP}\s*\[{PH}\])+', f'[{PH}]', s)
+            s = re.sub(rf'\[{PH}\](?:\s+\[{PH}\])+', f'[{PH}]', s)
 
     # Digit grouping commas: "1, 000" → "1,000"
     # Only if between digits (to avoid messing with lists)
@@ -289,7 +293,7 @@ def remove_figures_and_tables(soup_or_tag):
 def replace_citations_with_placeholder(soup_or_tag):
     """
     Find all <xref> tags that are citations (ref-type=bibr or citation)
-    and replace them with the placeholder "[ref]".
+    and replace them with the placeholder "[CIT_REF]".
     This is more robust than regex-based removal.
     """
     CITATION_REFS = {"bibr", "citation"}
@@ -297,7 +301,7 @@ def replace_citations_with_placeholder(soup_or_tag):
     for xr in soup_or_tag.find_all("xref"):
         rt = (xr.get("ref-type") or "").lower()
         if rt in CITATION_REFS:
-            xr.replace_with("[ref]")
+            xr.replace_with("[CIT_REF]")
 
 def replace_math_with_placeholder(soup_or_tag):
     """
@@ -354,40 +358,83 @@ def fix_glued_xrefs(soup_or_tag):
       (e.g., <xref>Fig 1</xref>A becomes <xref>Fig 1A</xref>)
       to prevent "Fig 1 A" during text extraction.
     """
-    CONTENT_REFS = {"fig", "figure", "table", "tables", "app", "boxed-text"}
+    CONTENT_REFS = {"fig", "fig-group", "table", "table-fn", "table-wrap", "table-wrap-group", "app", "boxed-text", "supplementary-material"}
 
     for xr in soup_or_tag.find_all("xref"):
         rt = (xr.get("ref-type") or "").lower()
+        if rt not in CONTENT_REFS:
+            continue
+        
+        # Look ahead to find panel letters or ranges
+        ns = xr.next_sibling
+        while ns and not isinstance(ns, NavigableString):
+            ns = ns.next_sibling
 
-        if rt in CONTENT_REFS:
-            ns = xr.next_sibling
-            if isinstance(ns, NavigableString):
-                s = str(ns)
-                # Regex to find glued panel letters (e.g., "A", "B", "A–C")
-                m = re.match(r"^([A-Za-z]{1,2}(?:\s*[–-]\s*[A-Za-z]{1,2})?)", s)
-                if m:
-                    panel_text = m.group(1)
-                    remaining_text = s[len(panel_text):]
+        if isinstance(ns, NavigableString):
+            s = str(ns)
+            # Regex to find glued panel letters (e.g., "A", "B", "A–C")
+            m = re.match(r"^([A-Za-z]{1,2}\d{0,2}(?:\s*[–-]\s*[A-Za-z]{1,2}\d{0,2})?)", s)
+            if m:
+                panel_text = m.group(1)
+                remaining_text = s[len(panel_text):]
 
-                    # Merge the panel_text into the xref tag
-                    if xr.string:
-                        # Simple case: <xref>Figure 1</xref>
-                        xr.string.replace_with(xr.string + panel_text)
+                    # Merge panel_text into the end of the xref
+                if xr.string:
+                    xr.string.replace_with(xr.string + panel_text)
+                else:
+                    # Try to find last NavigableString in contents
+                    last_string = None
+                    for content in reversed(xr.contents):
+                        if isinstance(content, NavigableString):
+                            last_string = content
+                            break
+                    if last_string:
+                        last_string.replace_with(last_string + panel_text)
                     else:
-                        # Complex case: <xref>Figure <bold>1</bold></xref>
-                        last_string = None
-                        for content in xr.contents:
-                            if isinstance(content, NavigableString):
-                                last_string = content
-                        if last_string:
-                            last_string.replace_with(last_string + panel_text)
-                        else:
-                            # Failsafe: just append it
-                            xr.append(NavigableString(panel_text))
+                        xr.append(NavigableString(panel_text))
 
-                    # Update the sibling string to contain only what's left
-                    ns.replace_with(remaining_text)
+                # Remove merged part from the following string
+                ns.replace_with(remaining_text)
 
+def replace_content_refs_with_placeholders(soup_or_tag):
+    """
+    Replace inline content xref tags (figures, tables, etc) with [FIG], [TAB], [APP], [BOX].
+    Assumes fix_glued_xrefs has already been applied to glue panel letters.
+    """
+    placeholder_map = {
+        "fig": "[FIG_REF]",
+        "fig-group": "[FIG_REF]",
+        "table": "[TAB_REF]",
+        "table-wrap": "[TAB_REF]",
+        "table-wrap-group": "[TAB_REF]",
+        "table-fn": "[TAB_REF]",
+        "app": "[APP_REF]",
+        "boxed-text": "[BOX_REF]",
+        "supplementary-material": "[SUP_REF]"
+        }
+
+    for xr in soup_or_tag.find_all("xref"):
+        rt = (xr.get("ref-type") or "").lower()
+        if rt not in placeholder_map:
+            continue
+
+        placeholder = placeholder_map[rt]
+
+        # Check if previous sibling is a Fig./Table prefix and remove it
+        prev = xr.previous_sibling
+        if isinstance(prev, NavigableString):
+            if re.search(r'\b(Fig(ure)?|Table|Appendix|Box)\.?$', prev.strip(), flags=re.I):
+                prev.replace_with('')
+
+        # Check for glued suffix (e.g., "-C") — though usually handled in fix_glued_xrefs
+        next_ = xr.next_sibling
+        if isinstance(next_, NavigableString):
+            m = re.match(r'^\s*[-–—]\s*\w{1,3}', next_)
+            if m:
+                # Remove suffix from sibling
+                next_.replace_with(next_[m.end():])
+
+        xr.replace_with(placeholder)
 
 # ---------- JATS pickers ----------
 def _process_section_markdown(section_tag, level, kept_titles_set, blockquote_prefix: str = ""):
@@ -583,6 +630,7 @@ def extract_body_with_markdown(soup, kept_titles_set):
     replace_math_with_placeholder(body)
     replace_code_with_placeholder(body)
     fix_glued_xrefs(body)
+    replace_content_refs_with_placeholders(body)
     convert_inline_markup(body)
     # Start the recursive processing from the body.
     # Initial call with level=0 makes main sections start with '#'.
@@ -634,6 +682,7 @@ def extract_abstract(art):
     replace_math_with_placeholder(abs_el)
     replace_code_with_placeholder(abs_el)
     fix_glued_xrefs(abs_el)
+    replace_content_refs_with_placeholders(abs_el)
     convert_inline_markup(abs_el)
     dummy_title_set = set()
     all_blocks = _process_section_markdown(abs_el, 1, dummy_title_set)
