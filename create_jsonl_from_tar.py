@@ -184,77 +184,79 @@ def is_in_ignored_section(tag) -> bool:
     (acknowledgments, references, bibliography, appendix, supplementary, etc.).
     """
     IGNORE_SECTION_TITLES = re.compile(
-        r"^(?:"
-        # Core sections
-        r"acknowledg(e)?ments?|"
-        r"references?|"
-        r"bibliograph(?:y|ies)|"
+    r"^(?:"
+    # Core sections
+    r"acknowledg(e)?ments?|"
+    r"references?|"
+    r"bibliograph(?:y|ies)|"
 
-        # Author Contributions
-        r"(?:authours|autors|authors?)'?(?:s|'s)? ?(?:contributions?|contribtions?|conributions?|constributions?|protections|rights(?: and users' rights)?|voice|competing interest(?:s)?|conflict of interest)|"
-        r"contributions?(?: of .*)?|"
-        r"contributor(?:s)?(?: information)?|"
-        r"credit authorship contribution statement|"
+    # Author Contributions
+    r"(?:authours|autors|authors?)'?(?:s|'s)? ?(?:contributions?|contribtions?|conributions?|constributions?|protections|rights(?: and users' rights)?|voice|competing interest(?:s)?|conflict of interest)|"
+    r"contributions?(?: of .*)?|"
+    r"contributor(?:s)?(?: information)?|"
+    r"credit authorship contribution statement|"
 
-        # Collaboration
-        r"col{1,2}ab(?:o|a)?rations?|"
+    # Collaboration
+    r"col{1,2}ab(?:o|a)?rations?|"
 
-        # List of people/committees
-        r"(?:clinical centres and )?investigators|committee members|working group|"
+    # List of people/committees
+    r"(?:clinical centres and )?investigators|committee members|working group|"
 
-        # Competing Interests & Ethics
-        r"conflict of interests?|"
-        r"(?:declaration of )?competing interest(?:s)?|"
-        r"ethics statement|"
+    # Competing Interests & Ethics
+    r"conflict of interests?|"
+    r"(?:declaration of )?competing interest(?:s)?|"
+    r"ethics statement|"
+    r"(?:informed )?consent(?: (?:for publication|to participate|statement|and assent|and ethics))?(?:[:\s].*)?|"
+    r"ethical consideration(?:s)?(?:[:\s].*)?|"
 
-        # History & Notes
-        r"pre-publication history|"
-        r"note added in proof|"
-        r"endnotes?|"
-        r"notes?|"
-        r"footnotes?|"
+    # History & Notes
+    r"pre-publication history|"
+    r"note added in proof|"
+    r"endnotes?|"
+    r"notes?|"
+    r"footnotes?|"
 
-        # Supplementary & Data
-        r"supplementar(?:y|ies|y material(?:s)?)?|"
-        r"supplemental|"
-        r"supporting information|"
-        r"additional (?:data )?files?|"
-        r"associated data|"
+    # Supplementary & Data
+    r"supplementar(?:y|ies|y material(?:s)?)?|"
+    r"supplemental|"
+    r"supporting information|"
+    r"additional (?:data )?files?|"
+    r"associated data|"
 
-        # Lists & Terminology
-        r"(?:lists? of )?(?:non-standard )?abb?re?vi?ations?(?: .*)?|"
-        r"nomenclature|"
-        r"list of symbols|"
+    # Lists & Terminology
+    r"(?:lists? of )?(?:non-standard )?abb?re?vi?ations?(?: .*)?|"
+    r"nomenclature|"
+    r"list of symbols|"
 
-        # Availability
-        r"data availability(?: statement)?|"
-        r"availability(?: and requirements)?|"
-        r"free(?:, full-text)?(?: access)? (?:versus open access|for all articles?)|"
+    # Availability
+    r"data availability(?: statement)?|"
+    r"availability(?: and requirements)?|"
+    r"free(?:, full-text)?(?: access)? (?:versus open access|for all articles?)|"
 
-        # Meta, Legal & Publishing
-        r"(?:source of )?funding(?: sources?| acknowledg[em]+nts?| and ethics| for .* research| statement| support|/support)?|"
-        r"disclaimer|"
-        r"open access|"
-        r"copyright(?: .*)?|"
-        r"license|"
-        r"permissions|"
-        r"intellectual property rights|"
-        r"peer review policy|journal scope|update|"
-        r"how to cite|"
+    # Meta, Legal & Publishing
+    r"(?:source of )?funding(?: sources?| acknowledg[em]+nts?| and ethics| for .* research| statement| support|/support)?|"
+    r"disclaimer|"
+    r"open access|"
+    r"copyright(?: .*)?|"
+    r"license|"
+    r"permissions|"
+    r"intellectual property rights|"
+    r"peer review policy|journal scope|update|"
+    r"how to cite|"
 
-        # Summary-like sections (excluding main abstract)
-        r"highlights|"
-        r"key points|"
-        r"keywords|"
-        r"graphical abstract|"
-        r"glossary|term definitions|"
+    # Summary-like sections (excluding main abstract)
+    r"highlights|"
+    r"key points|"
+    r"keywords|"
+    r"graphical abstract|"
+    r"glossary|term definitions|"
 
-        # Other common meta
-        # r"limitation(?:s)?|"
-        r"append(?:ix|ices)(?:[:\s].*)?"
-        r")$",
-        re.IGNORECASE
-    )
+    # Other common meta
+    # r"limitation(?:s)?|"
+    r"append(?:ix|ices)(?:[:\s].*)?"
+    r")$",
+    re.IGNORECASE
+)
 
     IGNORE_SEC_TYPES = {"supplementary-material", "display-objects", "data-availability", "COI-statement"}
 
@@ -296,7 +298,7 @@ def replace_citations_with_placeholder(soup_or_tag):
     and replace them with the placeholder "[CIT_REF]".
     This is more robust than regex-based removal.
     """
-    CITATION_REFS = {"bibr", "citation"}
+    CITATION_REFS = {"bibr", "citation", "ref"}
  
     for xr in soup_or_tag.find_all("xref"):
         rt = (xr.get("ref-type") or "").lower()
@@ -420,8 +422,18 @@ def replace_content_refs_with_placeholders(soup_or_tag):
         # Check if previous sibling is a Fig./Table prefix and remove it
         prev = xr.previous_sibling
         if isinstance(prev, NavigableString):
-            if re.search(r'\b(Fig(ure)?|Table|Appendix|Box)\.?$', prev.strip(), flags=re.I):
-                prev.replace_with('')
+            prev_text = str(prev)
+            new_text = re.sub(
+                r'(\s*[\(\[]?\s*)(?:Fig(?:\.|ure)?|Table|Appendix|Box)\.?\s*$',
+                '',
+                prev_text,
+                flags=re.I,
+            )
+            if new_text != prev_text:
+                if new_text:
+                    prev.replace_with(new_text)
+                else:
+                    prev.extract()
 
         # Check for glued suffix (e.g., "-C") — though usually handled in fix_glued_xrefs
         next_ = xr.next_sibling
