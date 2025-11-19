@@ -7,8 +7,8 @@ For each `*.jsonl.gz` file under the target directory the script reports:
 - token statistics (min/mean/median/max/percentiles) for input text and abstracts
 - character-length statistics (helpful for sanity checks)
 - ratios between abstract and text lengths (tokens & characters)
-- αποθήκευση αποτελεσμάτων σε JSON αρχείο (προεπιλογή: stats/qwen_token_stats.json)
-- προαιρετικά γραφήματα token counts & αριθμού εγγραφών (σε φάκελο plots) για εγγραφές με text+abstract
+- save results to JSON file (default: stats/qwen_token_stats.json)
+- optionally plot token counts & record numbers (in folder plots) for records with text+abstract
 
 Usage:
     python stats/qwen_token_stats.py --data-dir data/jsonl
@@ -28,9 +28,6 @@ from statistics import median
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-# --------------------------------------------------------------------------- #
-# Data structures
-# --------------------------------------------------------------------------- #
 
 @dataclass
 class LengthBuckets:
@@ -281,23 +278,13 @@ def merge_buckets(into: LengthBuckets, other: LengthBuckets) -> None:
     into.char_ratio.extend(other.char_ratio)
 
 
-def run_analysis(
-    data_dir: Path,
-    glob_pattern: str,
-    tokenizer_model: str,
-    trust_remote_code: bool,
-    add_special_tokens: bool,
-    limit: Optional[int],
-) -> Tuple[Dict[str, object], LengthBuckets]:
-    tokenizer = load_tokenizer(
-        tokenizer_model,
-        trust_remote_code=trust_remote_code,
-    )
-
+def run_analysis(data_dir: Path, glob_pattern: str, tokenizer_model: str, trust_remote_code: bool,
+                 add_special_tokens: bool, limit: Optional[int]) -> Tuple[Dict[str, object], LengthBuckets]:
+    tokenizer = load_tokenizer(tokenizer_model,trust_remote_code=trust_remote_code)
     paths = sorted(data_dir.glob(glob_pattern))
     if not paths:
         raise SystemExit(
-            f"Δεν βρέθηκαν αρχεία με pattern '{glob_pattern}' στον φάκελο {data_dir}."
+            f"Files don't exist with pattern '{glob_pattern}' in folder {data_dir}."
         )
 
     overall_buckets = LengthBuckets(
@@ -319,7 +306,7 @@ def run_analysis(
     json_errors = 0
 
     for path in paths:
-        logging.info("Ανάλυση αρχείου: %s", path.name)
+        logging.info("Analyzing file: %s", path.name)
         file_summary, buckets = collect_file_stats(
             path,
             tokenizer=tokenizer,

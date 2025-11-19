@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 """
 Filter jsonl.gz files keeping only records that include both text and abstract.
-
 For every `*.jsonl.gz` file inside the target directory the script emits a new
 gzipped JSONL file that only contains records where both the `text` and
 `abstract` fields exist and are non-empty (after stripping whitespace). By
 default the cleaned file sits next to the source one and uses the suffix
-`.clean.jsonl.gz`, e.g. `foo.jsonl.gz -> foo.clean.jsonl.gz`.
+`.clean.jsonl.gz`, e.g. `foo.jsonl.gz -> foo.clean.jsonl.gz`. After cleaning,
+the original `*.jsonl.gz` file is deleted to save space.
 """
 
 from __future__ import annotations
-
 import argparse
-import csv
 import gzip
 import json
 import logging
 from pathlib import Path
-from typing import Iterable, TextIO, Tuple
+from typing import Iterable, Tuple
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,8 +42,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log-file",
         type=Path,
-        default=Path("data/cleaned/cleaning_report.csv"),
-        help=("Path to a log file that will store per-file stats (default: data/cleaned/cleaning_report.csv).")
+        default=Path("data/cleaned/cleaning_report.json"),
+        help=(
+            "Path to a JSON log file that will store per-file stats (default: data/cleaned/cleaning_report.json)."
+        ),
     )
     parser.add_argument(
         "--overwrite",
@@ -78,6 +78,7 @@ def has_text(value) -> bool:
 
 
 def output_path_for(input_path: Path, suffix: str, output_dir: Path | None) -> Path:
+    """Return the output path for a cleaned file."""
     name = input_path.name
     if not name.endswith(".jsonl.gz"):
         raise ValueError(f"{input_path} is not a .jsonl.gz file")
@@ -87,6 +88,18 @@ def output_path_for(input_path: Path, suffix: str, output_dir: Path | None) -> P
     cleaned_name = f"{base}{suffix}.jsonl.gz"
     target_dir = output_dir if output_dir else input_path.parent
     return target_dir / cleaned_name
+
+
+def remove_source_tar(input_path: Path) -> None:
+    """Delete the original *.jsonl.gz (if present) once cleaning finishes."""
+    gz_path = input_path.with_suffix(".gz")
+    if not gz_path.exists():
+        return
+    try:
+        gz_path.unlink()
+        logging.info("Deleted original archive %s", gz_path)
+    except OSError as exc:
+        logging.warning("Failed to delete %s: %s", gz_path, exc)
 
 
 def clean_file(path: Path,suffix: str, output_dir: Path | None, overwrite: bool) -> Tuple[int, int, int, int, int]:
@@ -122,17 +135,11 @@ def clean_file(path: Path,suffix: str, output_dir: Path | None, overwrite: bool)
                 abstract_only += 1
             else:
                 missing_both += 1
-            logging.debug(
-                "Removed record without full text+abstract from %s line %d", path, line_no
-            )
+            logging.debug("Removed record without full text+abstract from %s line %d", path, line_no)
 
-    logging.info(
-        "Cleaned %s -> %s (kept %d, removed %d)",
-        path.name,
-        output_path.name,
-        kept,
-        skipped,
-    )
+    logging.info("Cleaned %s -> %s (kept %d, removed %d)", path.name, output_path.name, kept, skipped)
+    
+    remove_source_tar(path)
     return kept, skipped, text_only, abstract_only, missing_both
 
 
@@ -148,23 +155,9 @@ def main() -> None:
         raise SystemExit(f"Data directory not found: {data_dir}")
 
     log_path: Path | None = args.log_file
-    log_handle: TextIO | None = None
-    log_writer = None
+    log_entries: list[dict[str, int | str]] = []
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_handle = log_path.open("w", encoding="utf-8", newline="")
-        log_writer = csv.writer(log_handle)
-        log_writer.writerow(
-            [
-                "file",
-                "text_and_abstract",
-                "only_abstract",
-                "only_text",
-                "missing_text",
-                "missing_abstract",
-                "missing_both",
-            ]
-        )
 
     files = sorted(data_dir.glob("*.jsonl.gz"))
     if not files:
@@ -176,55 +169,53 @@ def main() -> None:
     total_abstract_only = 0
     total_missing_both = 0
 
-    try:
-        for file_path in files:
-            kept, removed, text_only, abstract_only, missing_both = clean_file(
-                file_path,
-                args.suffix,
-                args.output_dir,
-                args.overwrite,
+    for file_path in files:
+        kept, removed, text_only, abstract_only, missing_both = clean_file(
+            file_path,
+            args.suffix,
+            args.output_dir,
+            args.overwrite,
+        )
+        total_kept += kept
+        total_removed += removed
+        total_text_only += text_only
+        total_abstract_only += abstract_only
+        total_missing_both += missing_both
+
+        missing_text = abstract_only + missing_both
+        missing_abstract = text_only + missing_both
+
+        if log_path is not None:
+            log_entries.append(
+                {
+                    "file": file_path.name,
+                    "text_and_abstract": kept,
+                    "only_abstract": abstract_only,
+                    "only_text": text_only,
+                    "missing_text": missing_text,
+                    "missing_abstract": missing_abstract,
+                    "missing_both": missing_both,
+                }
             )
-            total_kept += kept
-            total_removed += removed
-            total_text_only += text_only
-            total_abstract_only += abstract_only
-            total_missing_both += missing_both
 
-            missing_text = abstract_only + missing_both
-            missing_abstract = text_only + missing_both
+    total_missing_text = total_abstract_only + total_missing_both
+    total_missing_abstract = total_text_only + total_missing_both
 
-            if log_writer:
-                log_writer.writerow(
-                    [
-                        file_path.name,
-                        kept,
-                        abstract_only,
-                        text_only,
-                        missing_text,
-                        missing_abstract,
-                        missing_both,
-                    ]
-                )
-
-        total_missing_text = total_abstract_only + total_missing_both
-        total_missing_abstract = total_text_only + total_missing_both
-
-        if log_writer:
-            log_writer.writerow(
-                [
-                    "TOTAL",
-                    total_kept,
-                    total_abstract_only,
-                    total_text_only,
-                    total_missing_text,
-                    total_missing_abstract,
-                    total_missing_both,
-                ]
-            )
-            print(f"Stats saved to {log_path}")
-    finally:
-        if log_handle:
-            log_handle.close()
+    if log_path is not None:
+        log_entries.append(
+            {
+                "file": "TOTAL",
+                "text_and_abstract": total_kept,
+                "only_abstract": total_abstract_only,
+                "only_text": total_text_only,
+                "missing_text": total_missing_text,
+                "missing_abstract": total_missing_abstract,
+                "missing_both": total_missing_both,
+            }
+        )
+        with log_path.open("w", encoding="utf-8") as log_file:
+            json.dump(log_entries, log_file, ensure_ascii=False, indent=2)
+        print(f"Stats saved to {log_path}")
 
 
 if __name__ == "__main__":

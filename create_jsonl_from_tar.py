@@ -784,9 +784,6 @@ def build_record(xml_bytes: bytes, kept_titles_set: set, count_error_log_path: s
     soup = BeautifulSoup(xml_bytes, "lxml-xml")
     pmc, metadata = extract_metadata(soup)
 
-    # if pmc:
-    #     metadata["pmc"] = pmc
-
     # 1. Extract abstract.
     abstract = extract_abstract(get_article_meta(soup))
 
