@@ -802,9 +802,10 @@ def build_record(xml_bytes: bytes, kept_titles_set: set, count_error_log_path: s
         metadata["abstract_count"] = count_words(abstract)
     except Exception as e:
         if count_error_log_path and pmc:
+            sanitized_error = str(e).replace("\n", " ")
             try:
                 with open(count_error_log_path, "a", encoding="utf-8") as lf:
-                    lf.write(f"{pmc}\tabstract_count\t{type(e).__name__}: {str(e).replace('\n',' ')}\n")
+                    lf.write(f"{pmc}\tabstract_count\t{type(e).__name__}: {sanitized_error}\n")
             except Exception:
                 pass
 
@@ -813,9 +814,10 @@ def build_record(xml_bytes: bytes, kept_titles_set: set, count_error_log_path: s
         metadata["text_count"] = count_words(text)
     except Exception as e:
         if count_error_log_path and pmc:
+            sanitized_error = str(e).replace("\n", " ")
             try:
                 with open(count_error_log_path, "a", encoding="utf-8") as lf:
-                    lf.write(f"{pmc}\ttext_count\t{type(e).__name__}: {str(e).replace('\n',' ')}\n")
+                    lf.write(f"{pmc}\ttext_count\t{type(e).__name__}: {sanitized_error}\n")
             except Exception:
                 pass
 
@@ -838,7 +840,6 @@ def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
     tar_log_dir = os.path.join(log_dir, prefix)
     os.makedirs(tar_log_dir, exist_ok=True)
     
-    log_path = os.path.join(tar_log_dir, "missing_abstracts.log")
     count_error_log_path = os.path.join(tar_log_dir, "error_count.log")
     titles_log_path = os.path.join(tar_log_dir, "kept_section_titles.log")
 
@@ -856,16 +857,6 @@ def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
             parsed += 1
             try:
                 rec = build_record(xml_bytes, all_kept_titles, count_error_log_path=count_error_log_path)
-                # Log PMC IDs that lack an abstract
-                if not (rec.get("abstract") or "").strip():
-                    try:
-                        with open(log_path, "a", encoding="utf-8") as lf:
-                            pmcid = rec.get("pmcid") or rec.get("metadata", {}).get("pmc", "")
-                            title = (rec.get("metadata", {}).get("article_title") or "").replace("\n", " ")
-                            lf.write(f"{pmcid}\t{title}\n")
-                    except Exception:
-                        # Logging must not break the pipeline; ignore log I/O errors
-                        pass
                 fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 kept += 1
             except Exception as e:
@@ -966,7 +957,17 @@ def main():
     
     # --- Process Logic ---
     if os.path.exists(tar_path):
-        tar_to_jsonl(tar_path, args.out_dir, args.log_dir)
+        out_path = tar_to_jsonl(tar_path, args.out_dir, args.log_dir)
+        try:
+            os.remove(tar_path)
+            print(f"[cleanup] removed {tar_path}")
+        except OSError as e:
+            print(f"[WARN] Could not remove tar file {tar_path}: {e}", file=sys.stderr)
+        try:
+            os.rmdir(args.raw_dir)
+            print(f"[cleanup] removed empty directory {args.raw_dir}")
+        except OSError:
+            pass
     else:
         print(f"[ERROR] Tar file not found at: {tar_path}", file=sys.stderr)
         sys.exit(1)

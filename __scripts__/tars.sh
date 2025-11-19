@@ -14,4 +14,4 @@ python create_jsonl_from_tar.py oa_comm_xml.PMC011xxxxxx.baseline.2025-06-26.tar
 python create_jsonl_from_tar.py oa_comm_xml.PMC012xxxxxx.baseline.2025-06-26.tar.gz
 
 # Step 2: Clean JSONL files. Keep only the records with non-empty 'abstract' and 'body_text' fields.
-python clean_jsonl.py --input-dir data/jsonl --output-dir data/jsonl_cleaned
+python clean_jsonl.py

@@ -6,7 +6,9 @@ gzipped JSONL file that only contains records where both the `text` and
 `abstract` fields exist and are non-empty (after stripping whitespace). By
 default the cleaned file sits next to the source one and uses the suffix
 `.clean.jsonl.gz`, e.g. `foo.jsonl.gz -> foo.clean.jsonl.gz`. After cleaning,
-the original `*.jsonl.gz` file is deleted to save space.
+the original `*.jsonl.gz` file is deleted to save space. In addition to the
+cleaned file a `.removed.log` file is created inside `removed_pmcs/` that lists
+the PMCIDs of the discarded records.
 """
 
 from __future__ import annotations
@@ -90,7 +92,7 @@ def output_path_for(input_path: Path, suffix: str, output_dir: Path | None) -> P
     return target_dir / cleaned_name
 
 
-def remove_source_tar(input_path: Path) -> None:
+def remove_source_jsonl(input_path: Path) -> None:
     """Delete the original *.jsonl.gz (if present) once cleaning finishes."""
     gz_path = input_path.with_suffix(".gz")
     if not gz_path.exists():
@@ -102,7 +104,8 @@ def remove_source_tar(input_path: Path) -> None:
         logging.warning("Failed to delete %s: %s", gz_path, exc)
 
 
-def clean_file(path: Path,suffix: str, output_dir: Path | None, overwrite: bool) -> Tuple[int, int, int, int, int]:
+
+def clean_file(path: Path, suffix: str, output_dir: Path | None, overwrite: bool) -> Tuple[int, int, int, int, int]:
     """Return (kept, skipped, text_only, abstract_only, missing_both) for one file."""
     output_path = output_path_for(path, suffix, output_dir)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,7 +120,13 @@ def clean_file(path: Path,suffix: str, output_dir: Path | None, overwrite: bool)
     abstract_only = 0
     missing_both = 0
 
-    with gzip.open(output_path, "wt", encoding="utf-8") as out_fh:
+    log_root = output_dir if output_dir else path.parent
+    log_dir = log_root / "removed_pmcs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    base_name = path.name[:-len(".jsonl.gz")] if path.name.endswith(".jsonl.gz") else path.stem
+    log_path = log_dir / f"{base_name}.removed.log"
+
+    with gzip.open(output_path, "wt", encoding="utf-8") as out_fh, log_path.open("w", encoding="utf-8") as log_fh:
         for line_no, record in iter_jsonl_records(path):
             text_ok = has_text(record.get("text"))
             abstract_ok = has_text(record.get("abstract"))
@@ -135,11 +144,15 @@ def clean_file(path: Path,suffix: str, output_dir: Path | None, overwrite: bool)
                 abstract_only += 1
             else:
                 missing_both += 1
+
+            pmcid = record.get("pmcid")
+            if pmcid not in (None, ""):
+                log_fh.write(f"{pmcid}\n")
             logging.debug("Removed record without full text+abstract from %s line %d", path, line_no)
 
     logging.info("Cleaned %s -> %s (kept %d, removed %d)", path.name, output_path.name, kept, skipped)
-    
-    remove_source_tar(path)
+
+    remove_source_jsonl(path)
     return kept, skipped, text_only, abstract_only, missing_both
 
 
@@ -216,6 +229,12 @@ def main() -> None:
         with log_path.open("w", encoding="utf-8") as log_file:
             json.dump(log_entries, log_file, ensure_ascii=False, indent=2)
         print(f"Stats saved to {log_path}")
+
+    try:
+        data_dir.rmdir()
+        logging.info("Deleted empty directory %s", data_dir)
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":
