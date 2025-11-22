@@ -836,6 +836,48 @@ def build_record(xml_bytes: bytes, kept_titles_set: set, count_error_log_path: s
     return {"pmcid": pmc ,"abstract": abstract, "text": text, "metadata": metadata}
 
 
+def update_cleaning_report(log_dir: str, out_filename: str, stats: dict):
+    """Update the dataset-wide cleaning report under `log_dir`."""
+    report_path = os.path.join(log_dir, "cleaning_report.json")
+    entry = {
+        "file": out_filename,
+        "text_and_abstract": stats.get("kept", 0),
+        "only_abstract": stats.get("abstract_only", 0),
+        "only_text": stats.get("text_only", 0),
+        "missing_both": stats.get("missing_both", 0),
+    }
+
+    existing_entries = []
+    if os.path.exists(report_path):
+        try:
+            with open(report_path, "r", encoding="utf-8") as report_file:
+                payload = json.load(report_file)
+            if isinstance(payload, dict) and isinstance(payload.get("files"), list):
+                existing_entries = payload["files"]
+            elif isinstance(payload, list):
+                existing_entries = [
+                    e for e in payload
+                    if isinstance(e, dict) and e.get("file") != "TOTAL"
+                ]
+        except Exception as e:
+            print(f"[WARN] Could not read existing cleaning report: {e}", file=sys.stderr)
+
+    updated_entries = [e for e in existing_entries if e.get("file") != out_filename]
+    updated_entries.append(entry)
+
+    total_entry = {"file": "TOTAL"}
+    for key in ("text_and_abstract", "only_abstract", "only_text", "missing_both"):
+        total_entry[key] = sum(e.get(key, 0) for e in updated_entries)
+
+    payload = {"files": updated_entries, "total": total_entry}
+    try:
+        with open(report_path, "w", encoding="utf-8") as report_file:
+            json.dump(payload, report_file, ensure_ascii=False, indent=2)
+        print(f"[LOG] Cleaning report updated at {report_path}")
+    except Exception as e:
+        print(f"[ERROR] Could not write cleaning report: {e}", file=sys.stderr)
+
+
 def download_with_progress(url: str, dest_path: str):
     """Download a file while showing a tqdm progress bar."""
     desc = f"Downloading {os.path.basename(dest_path)}"
@@ -925,29 +967,7 @@ def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
             print(f"[ERROR] Could not write titles log file: {e}", file=sys.stderr)
 
 
-    report_path = os.path.join(tar_log_dir, "cleaning_report.json")
-    report_entries = [
-        {
-            "file": os.path.basename(out_path),
-            "text_and_abstract": stats["kept"],
-            "only_abstract": stats["abstract_only"],
-            "only_text": stats["text_only"],
-            "missing_both": stats["missing_both"],
-        },
-        {
-            "file": "TOTAL",
-            "text_and_abstract": stats["kept"],
-            "only_abstract": stats["abstract_only"],
-            "only_text": stats["text_only"],
-            "missing_both": stats["missing_both"],
-        },
-    ]
-    try:
-        with open(report_path, "w", encoding="utf-8") as report_file:
-            json.dump(report_entries, report_file, ensure_ascii=False, indent=2)
-        print(f"[LOG] Cleaning report saved to {report_path}")
-    except Exception as e:
-        print(f"[ERROR] Could not write cleaning report: {e}", file=sys.stderr)
+    update_cleaning_report(log_dir, os.path.basename(out_path), stats)
 
     print(
         f"[OK] {base}: parsed={parsed}, written={stats['kept']}, "
