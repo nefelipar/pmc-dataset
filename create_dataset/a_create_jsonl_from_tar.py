@@ -25,6 +25,9 @@ FORBIDDEN_CONTAINER_TAGS = {
     "chem-struct-wrap",
     "array", "supplementary-material"}
 
+# Stats for filtering empty text/abstract combinations
+STAT_KEYS = ("kept", "removed", "text_only", "abstract_only", "missing_both")
+
 os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -152,6 +155,11 @@ def count_words(text: str) -> int:
         return n
     # Fallback: Unicode-aware whitespace split
     return len(re.findall(r"\S+", text, flags=re.UNICODE))
+
+
+def has_text(value: object) -> bool:
+    """Return True when the value is a non-empty string once stripped."""
+    return isinstance(value, str) and bool(value.strip())
 
 
 def in_boundary_without_forbidden(tag, boundary_name: str) -> bool:
@@ -841,10 +849,11 @@ def download_with_progress(url: str, dest_path: str):
 
 
 def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
-    """ Convert a .tar.gz of JATS XML files to a single .jsonl file.
+    """Convert a .tar.gz of JATS XML files to a single .jsonl file.
+
     parsed = number of XML files parsed
-    kept   = number of JSON records written
     skipped= number of XML files skipped due to errors
+    Filtering stats (kept/text_only/abstract_only/missing_both) are logged per tarball.
     """
     base = os.path.basename(tar_path)
     prefix = os.path.splitext(os.path.splitext(base)[0])[0]  # drop .tar(.gz)
@@ -858,11 +867,16 @@ def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
     
     count_error_log_path = os.path.join(tar_log_dir, "error_count.log")
     titles_log_path = os.path.join(tar_log_dir, "kept_section_titles.log")
+    removed_log_path = os.path.join(tar_log_dir, "removed_pmcs.log")
+    print(f"[LOG] Removed PMCIDs stored in {removed_log_path}")
 
-    parsed = kept = skipped = 0
+    parsed = skipped = 0
+    stats = {key: 0 for key in STAT_KEYS}
     all_kept_titles = set()
 
-    with tarfile.open(tar_path, "r:gz") as tf, open(out_path, "w", encoding="utf-8") as fout:
+    with tarfile.open(tar_path, "r:gz") as tf, \
+         open(out_path, "w", encoding="utf-8") as fout, \
+         open(removed_log_path, "w", encoding="utf-8") as removed_log:
         members = [
             m for m in tf.getmembers()
             if m.isfile() and (m.name or "").lower().endswith(".xml")
@@ -875,8 +889,25 @@ def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
             parsed += 1
             try:
                 rec = build_record(xml_bytes, all_kept_titles, count_error_log_path=count_error_log_path)
-                fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                kept += 1
+                text_ok = has_text(rec.get("text"))
+                abstract_ok = has_text(rec.get("abstract"))
+
+                if text_ok and abstract_ok:
+                    fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    stats["kept"] += 1
+                    continue
+
+                stats["removed"] += 1
+                if text_ok and not abstract_ok:
+                    stats["text_only"] += 1
+                elif abstract_ok and not text_ok:
+                    stats["abstract_only"] += 1
+                else:
+                    stats["missing_both"] += 1
+
+                pmcid = rec.get("pmcid")
+                if pmcid not in (None, ""):
+                    removed_log.write(f"{pmcid}\n")
             except Exception as e:
                 skipped += 1  # skip invalid XML or other errors
                 print(f"[ERROR] Skipped {m.name} due to error: {e}", file=sys.stderr)
@@ -894,7 +925,34 @@ def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
             print(f"[ERROR] Could not write titles log file: {e}", file=sys.stderr)
 
 
-    print(f"[OK] {base}: parsed={parsed}, written={kept}, skipped={skipped}")
+    report_path = os.path.join(tar_log_dir, "cleaning_report.json")
+    report_entries = [
+        {
+            "file": os.path.basename(out_path),
+            "text_and_abstract": stats["kept"],
+            "only_abstract": stats["abstract_only"],
+            "only_text": stats["text_only"],
+            "missing_both": stats["missing_both"],
+        },
+        {
+            "file": "TOTAL",
+            "text_and_abstract": stats["kept"],
+            "only_abstract": stats["abstract_only"],
+            "only_text": stats["text_only"],
+            "missing_both": stats["missing_both"],
+        },
+    ]
+    try:
+        with open(report_path, "w", encoding="utf-8") as report_file:
+            json.dump(report_entries, report_file, ensure_ascii=False, indent=2)
+        print(f"[LOG] Cleaning report saved to {report_path}")
+    except Exception as e:
+        print(f"[ERROR] Could not write cleaning report: {e}", file=sys.stderr)
+
+    print(
+        f"[OK] {base}: parsed={parsed}, written={stats['kept']}, "
+        f"removed_empty={stats['removed']}, skipped={skipped}"
+    )
     print(f"[OUT] {out_path}")
     return out_path
 
