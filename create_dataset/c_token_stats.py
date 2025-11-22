@@ -1,23 +1,12 @@
 #!/usr/bin/env python3
 """
-Compute dataset statistics using a Qwen tokenizer.
-
-For each `*.jsonl.gz` file under the target directory the script reports:
-- total records, missing text, missing abstract, missing PMCID
-- token statistics (min/mean/median/max/percentiles) for input text and abstracts
-- character-length statistics (helpful for sanity checks)
-- ratios between abstract and text lengths (tokens & characters)
-- save results to JSON file (default: stats/qwen_token_stats.json)
-- optionally plot token counts & record numbers (in folder plots) for records with text+abstract
-
-Usage:
-    python stats/qwen_token_stats.py --data-dir data/jsonl
+Find and report token statistics from cleaned .jsonl dataset files. More specifically, it computes
+token counts for the "text" and "abstract" fields of each record, and generates summary statistics
+and histograms. It has as a default tokenizer the Qwen1.5-1.8B model, but any HuggingFace tokenizer can be used.
 """
 
 from __future__ import annotations
-
 import argparse
-import gzip
 import json
 import logging
 import math
@@ -25,65 +14,51 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional
+import matplotlib.pyplot as plt
 
 
+PLACEHOLDER_TOKENS = [
+    "[MATH]",
+    "[CODE]",
+    "[CIT_REF]",
+    "[FIG_REF]",
+    "[TAB_REF]",
+    "[APP_REF]",
+    "[SUP_REF]",
+    "[BOX_REF]",
+]
 
-@dataclass
-class LengthBuckets:
-    text_tokens: List[int]
-    abstract_tokens: List[int]
-    text_chars: List[int]
-    abstract_chars: List[int]
-    text_with_abstract_tokens: List[int]
-    abstract_with_text_tokens: List[int]
-    token_ratio: List[float]
-    char_ratio: List[float]
 
-
-# --------------------------------------------------------------------------- #
-# Helpers
-# --------------------------------------------------------------------------- #
-
-def load_tokenizer(model_name: str, trust_remote_code: bool = True):
-    """Load a HuggingFace tokenizer for a given model name."""
+def load_tokenizer(name: str, trust_remote_code: bool = True, placeholder_tokens: Optional[List[str]] = None):
+    """ Load a HuggingFace tokenizer by name safely, with optional placeholder tokens added."""
     try:
-        from transformers import AutoTokenizer  # type: ignore
-    except ImportError as exc:  # pragma: no cover - dependency hint
-        raise SystemExit(
-            "Η βιβλιοθήκη transformers δεν βρέθηκε. Εγκατάστησέ την με "
-            "`pip install transformers` πριν τρέξεις το script."
+        from transformers import AutoTokenizer  
+    except ImportError as exc: 
+        raise SystemExit("The 'transformers' library is not installed."
         ) from exc
 
     try:
-        logging.info("Φόρτωση tokenizer: %s", model_name)
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
-            trust_remote_code=trust_remote_code,
-        )
-        # Δεν τρέχουμε το μοντέλο, μόνο μετράμε tokens, οπότε αφαιρούμε το όριο.
+        logging.info("Loading tokenizer: %s", name)
+        tokenizer = AutoTokenizer.from_pretrained(name, trust_remote_code=trust_remote_code)
+        
+        # We are not doing inference, so disable token limit.
         tokenizer.model_max_length = sys.maxsize
         tokenizer.init_kwargs["model_max_length"] = sys.maxsize
-        tokenizer.deprecation_warnings["sequence_length_is_longer_than_the_maximum_length"] = "ignore"  # type: ignore[attr-defined]
-    except Exception as exc:  # pragma: no cover - runtime environment specific
-        raise SystemExit(
-            f"Αποτυχία φόρτωσης του tokenizer '{model_name}'. "
-            "Σιγουρέψου ότι το έχεις κατεβάσει (π.χ. με `huggingface-cli download`). "
-            f"Λεπτομέρειες σφάλματος: {exc}"
+        tokenizer.deprecation_warnings["sequence_length_is_longer_than_the_maximum_length"] = "ignore" 
+        if placeholder_tokens:
+            new_tokens = [tok for tok in placeholder_tokens if tok not in tokenizer.get_vocab()]
+            if new_tokens:
+                tokenizer.add_special_tokens({"additional_special_tokens": new_tokens})
+                logging.info("Added %d placeholder tokens", len(new_tokens))
+        return tokenizer
+    except Exception as exc:
+        raise SystemExit(f"Failed to load tokenizer '{name}'. Make sure it is available (e.g., `huggingface-cli download`).\nDetails: {exc}"
         ) from exc
-    return tokenizer
 
 
-def is_missing(value: Optional[str]) -> bool:
-    """Return True when a field should be counted as 'missing'."""
-    if value is None:
-        return True
-    if isinstance(value, str) and not value.strip():
-        return True
-    return False
-
-
-def safe_mean(values: Iterable[float]) -> Optional[float]:
+def safe_mean(values: Iterable[int]) -> Optional[float]:
+    """Compute the mean of a list of integers safely, returning None for empty input."""
     values = list(values)
     if not values:
         return None
@@ -91,25 +66,24 @@ def safe_mean(values: Iterable[float]) -> Optional[float]:
 
 
 def percentile(sorted_values: List[int], q: float) -> float:
-    """Interpolate percentile on pre-sorted values."""
+    """Compute the q-th percentile of a sorted list of integers."""
     if not sorted_values:
         return math.nan
     if q <= 0:
         return float(sorted_values[0])
     if q >= 1:
         return float(sorted_values[-1])
-    k = (len(sorted_values) - 1) * q
-    f = math.floor(k)
-    c = math.ceil(k)
-    if f == c:
-        return float(sorted_values[int(k)])
-    d0 = sorted_values[f] * (c - k)
-    d1 = sorted_values[c] * (k - f)
-    return float(d0 + d1)
+    position = (len(sorted_values) - 1) * q
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return float(sorted_values[lower])
+    weight = position - lower
+    return float(sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight)
 
 
-def summarise(values: List[int]) -> Dict[str, Optional[float]]:
-    """Return descriptive statistics for a list of numeric values."""
+def describe(values: List[int]) -> Dict[str, Optional[float]]:
+    """Compute descriptive statistics for a list of integers."""
     if not values:
         return {
             "count": 0,
@@ -121,6 +95,7 @@ def summarise(values: List[int]) -> Dict[str, Optional[float]]:
             "p99": None,
             "max": None,
         }
+
     sorted_vals = sorted(values)
     return {
         "count": len(sorted_vals),
@@ -134,402 +109,197 @@ def summarise(values: List[int]) -> Dict[str, Optional[float]]:
     }
 
 
-def summarise_ratio(values: List[float]) -> Dict[str, Optional[float]]:
+def plot_hist(values: List[int], title: str, output_path: Path, bins: int = 100, color: str = "tab:blue") -> None:
+    """Plot a histogram of the given values and save it to the specified path."""
+    if plt is None: 
+        raise SystemExit("The matplotlib library was not found. Install it with ``pip install matplotlib`` to generate plots.")
     if not values:
-        return {
-            "count": 0,
-            "min": None,
-            "mean": None,
-            "median": None,
-            "max": None,
-        }
-    sorted_vals = sorted(values)
-    return {
-        "count": len(sorted_vals),
-        "min": float(sorted_vals[0]),
-        "mean": safe_mean(sorted_vals),
-        "median": float(median(sorted_vals)),
-        "max": float(sorted_vals[-1]),
-    }
+        logging.warning("No values to plot for '%s'", title)
+        return
+    plt.figure(figsize=(10, 6))
+    plt.hist(values, bins=bins, color=color, alpha=0.75, edgecolor="black")
+    plt.title(title)
+    plt.xlabel("Number of tokens")
+    plt.ylabel("Number of records")
+    plt.grid(True, axis="y", alpha=0.3)
+    plt.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path)
+    plt.close()
+    logging.info("Saved plot: %s", output_path)
 
 
-def collect_file_stats(
-    path: Path,
-    tokenizer,
-    add_special_tokens: bool = False,
-    limit: Optional[int] = None,
-) -> Tuple[Dict[str, object], LengthBuckets]:
-    total = 0
-    missing_text = 0
-    missing_abstract = 0
-    missing_pmcid = 0
-    json_errors = 0
+def clean_text(value) -> Optional[str]:
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned:
+            return cleaned
+    return None
 
-    text_tokens: List[int] = []
-    abstract_tokens: List[int] = []
-    text_chars: List[int] = []
-    abstract_chars: List[int] = []
-    token_ratio: List[float] = []
-    char_ratio: List[float] = []
-    text_with_abstract_tokens: List[int] = []
-    abstract_with_text_tokens: List[int] = []
 
-    with gzip.open(path, "rt", encoding="utf-8") as fh:
-        for idx, line in enumerate(fh, 1):
-            line = line.strip()
+"""Container for statistics of a single file."""
+@dataclass
+class FileStats:
+    file_name: str
+    text_tokens: List[int]
+    abstract_tokens: List[int]
+    placeholder_counts: Dict[str, int]
+
+
+def update_placeholder_counts(container: Dict[str, int], text: str) -> None:
+    """Update the counts of placeholder tokens found in the given text."""
+    for token in PLACEHOLDER_TOKENS:
+        container[token] += text.count(token)
+
+
+def compute_file_stats(path: Path, tokenizer, add_special_tokens: bool) -> FileStats:
+    """Compute token statistics for a single .jsonl file."""
+    text_counts: List[int] = []
+    abstract_counts: List[int] = []
+    placeholder_totals: Dict[str, int] = {token: 0 for token in PLACEHOLDER_TOKENS}
+    with path.open("r", encoding="utf-8") as handle:
+        for idx, raw_line in enumerate(handle, 1):
+            line = raw_line.strip()
             if not line:
                 continue
-            total += 1
             try:
                 record = json.loads(line)
-            except json.JSONDecodeError:
-                json_errors += 1
-                logging.warning("Σφάλμα JSON στη γραμμή %d του %s", idx, path.name)
+            except json.JSONDecodeError as exc:
+                logging.warning("Skip of record %s:%d - bad JSON (%s)", path.name, idx, exc)
                 continue
 
-            text_val = record.get("text")
-            abstract_val = record.get("abstract")
-            pmcid_val = record.get("pmcid")
+            text_value = clean_text(record.get("text"))
+            if text_value is not None:
+                text_counts.append(len(tokenizer.encode(text_value, add_special_tokens=add_special_tokens)))
+                update_placeholder_counts(placeholder_totals, text_value)
 
-            if is_missing(text_val):
-                missing_text += 1
-            else:
-                assert isinstance(text_val, str)
-                tokenised = tokenizer.encode(
-                    text_val,
-                    add_special_tokens=add_special_tokens,
-                )
-                text_tokens.append(len(tokenised))
-                text_chars.append(len(text_val))
+            abstract_value = clean_text(record.get("abstract"))
+            if abstract_value is not None:
+                abstract_counts.append(len(tokenizer.encode(abstract_value, add_special_tokens=add_special_tokens)))
+                update_placeholder_counts(placeholder_totals, abstract_value)
 
-            if is_missing(abstract_val):
-                missing_abstract += 1
-            else:
-                assert isinstance(abstract_val, str)
-                tokenised_abs = tokenizer.encode(
-                    abstract_val,
-                    add_special_tokens=add_special_tokens,
-                )
-                abstract_tokens.append(len(tokenised_abs))
-                abstract_chars.append(len(abstract_val))
-
-            if is_missing(pmcid_val):
-                missing_pmcid += 1
-
-            if (
-                not is_missing(text_val)
-                and not is_missing(abstract_val)
-                and text_tokens
-                and abstract_tokens
-            ):
-                text_with_abstract_tokens.append(text_tokens[-1])
-                abstract_with_text_tokens.append(abstract_tokens[-1])
-                if text_tokens[-1] > 0:
-                    token_ratio.append(
-                        abstract_tokens[-1] / float(text_tokens[-1])
-                    )
-                if text_chars[-1] > 0:
-                    char_ratio.append(
-                        abstract_chars[-1] / float(text_chars[-1])
-                    )
-
-            if limit is not None and total >= limit:
-                break
-
-    summary = {
-        "file": path.name,
-        "total_records": total,
-        "missing_text": missing_text,
-        "missing_abstract": missing_abstract,
-        "missing_pmcid": missing_pmcid,
-        "json_errors": json_errors,
-        "text_token_stats": summarise(text_tokens),
-        "abstract_token_stats": summarise(abstract_tokens),
-        "text_char_stats": summarise(text_chars),
-        "abstract_char_stats": summarise(abstract_chars),
-        "paired_records": len(text_with_abstract_tokens),
-        "paired_text_token_stats": summarise(text_with_abstract_tokens),
-        "paired_abstract_token_stats": summarise(abstract_with_text_tokens),
-        "token_ratio_stats": summarise_ratio(token_ratio),
-        "char_ratio_stats": summarise_ratio(char_ratio),
-    }
-
-    buckets = LengthBuckets(
-        text_tokens=text_tokens,
-        abstract_tokens=abstract_tokens,
-        text_chars=text_chars,
-        abstract_chars=abstract_chars,
-        text_with_abstract_tokens=text_with_abstract_tokens,
-        abstract_with_text_tokens=abstract_with_text_tokens,
-        token_ratio=token_ratio,
-        char_ratio=char_ratio,
+    return FileStats(
+        file_name=path.name,
+        text_tokens=text_counts,
+        abstract_tokens=abstract_counts,
+        placeholder_counts=placeholder_totals,
     )
-    return summary, buckets
-
-
-def merge_buckets(into: LengthBuckets, other: LengthBuckets) -> None:
-    into.text_tokens.extend(other.text_tokens)
-    into.abstract_tokens.extend(other.abstract_tokens)
-    into.text_chars.extend(other.text_chars)
-    into.abstract_chars.extend(other.abstract_chars)
-    into.text_with_abstract_tokens.extend(other.text_with_abstract_tokens)
-    into.abstract_with_text_tokens.extend(other.abstract_with_text_tokens)
-    into.token_ratio.extend(other.token_ratio)
-    into.char_ratio.extend(other.char_ratio)
-
-
-def run_analysis(data_dir: Path, glob_pattern: str, tokenizer_model: str, trust_remote_code: bool,
-                 add_special_tokens: bool, limit: Optional[int]) -> Tuple[Dict[str, object], LengthBuckets]:
-    tokenizer = load_tokenizer(tokenizer_model,trust_remote_code=trust_remote_code)
-    paths = sorted(data_dir.glob(glob_pattern))
-    if not paths:
-        raise SystemExit(
-            f"Files don't exist with pattern '{glob_pattern}' in folder {data_dir}."
-        )
-
-    overall_buckets = LengthBuckets(
-        text_tokens=[],
-        abstract_tokens=[],
-        text_chars=[],
-        abstract_chars=[],
-        text_with_abstract_tokens=[],
-        abstract_with_text_tokens=[],
-        token_ratio=[],
-        char_ratio=[],
-    )
-
-    per_file: List[Dict[str, object]] = []
-    total_records = 0
-    missing_text = 0
-    missing_abstract = 0
-    missing_pmcid = 0
-    json_errors = 0
-
-    for path in paths:
-        logging.info("Analyzing file: %s", path.name)
-        file_summary, buckets = collect_file_stats(
-            path,
-            tokenizer=tokenizer,
-            add_special_tokens=add_special_tokens,
-            limit=limit,
-        )
-        per_file.append(file_summary)
-        merge_buckets(overall_buckets, buckets)
-
-        total_records += file_summary["total_records"]  # type: ignore[arg-type]
-        missing_text += file_summary["missing_text"]  # type: ignore[arg-type]
-        missing_abstract += file_summary["missing_abstract"]  # type: ignore[arg-type]
-        missing_pmcid += file_summary["missing_pmcid"]  # type: ignore[arg-type]
-        json_errors += file_summary["json_errors"]  # type: ignore[arg-type]
-
-    overall = {
-        "total_records": total_records,
-        "missing_text": missing_text,
-        "missing_abstract": missing_abstract,
-        "missing_pmcid": missing_pmcid,
-        "json_errors": json_errors,
-        "text_token_stats": summarise(overall_buckets.text_tokens),
-        "abstract_token_stats": summarise(overall_buckets.abstract_tokens),
-        "text_char_stats": summarise(overall_buckets.text_chars),
-        "abstract_char_stats": summarise(overall_buckets.abstract_chars),
-        "paired_records": len(overall_buckets.text_with_abstract_tokens),
-        "paired_text_token_stats": summarise(overall_buckets.text_with_abstract_tokens),
-        "paired_abstract_token_stats": summarise(
-            overall_buckets.abstract_with_text_tokens
-        ),
-        "token_ratio_stats": summarise_ratio(overall_buckets.token_ratio),
-        "char_ratio_stats": summarise_ratio(overall_buckets.char_ratio),
-    }
-
-    return {
-        "tokenizer": tokenizer_model,
-        "add_special_tokens": add_special_tokens,
-        "data_dir": str(data_dir),
-        "files": per_file,
-        "overall": overall,
-    }, overall_buckets
-
-
-def generate_plots(
-    plots_dir: Path,
-    result: Dict[str, Any],
-    buckets: LengthBuckets,
-    hist_bins: int,
-) -> None:
-    try:
-        import matplotlib.pyplot as plt  # type: ignore
-    except ImportError as exc:  # pragma: no cover - optional dependency
-        raise SystemExit(
-            "Για να δημιουργηθούν γραφήματα χρειάζεται το matplotlib "
-            "(π.χ. `pip install matplotlib`)."
-        ) from exc
-
-    plots_dir.mkdir(parents=True, exist_ok=True)
-
-    files_info = result.get("files", [])
-    if files_info:
-        labels = [str(f["file"]) for f in files_info]
-        counts = [int(f["total_records"]) for f in files_info]
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.bar(range(len(labels)), counts, color="#4e79a7")
-        ax.set_xticks(range(len(labels)))
-        ax.set_xticklabels(labels, rotation=45, ha="right")
-        ax.set_ylabel("Αριθμός εγγραφών")
-        ax.set_title("Εγγραφές ανά αρχείο")
-        ax.grid(axis="y", linestyle="--", alpha=0.4)
-        fig.tight_layout()
-        fig.savefig(plots_dir / "records_per_file.png", dpi=200)
-        plt.close(fig)
-    else:
-        logging.warning("Δεν υπάρχουν πληροφορίες αρχείων για γράφημα εγγραφών.")
-
-    if buckets.text_with_abstract_tokens:
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.hist(
-            buckets.text_with_abstract_tokens,
-            bins=hist_bins,
-            color="#59a14f",
-            edgecolor="black",
-        )
-        ax.set_xlabel("Μήκος input (tokens) σε εγγραφές με abstract")
-        ax.set_ylabel("Συχνότητα")
-        ax.set_title("Κατανομή tokens για text")
-        ax.grid(axis="y", linestyle="--", alpha=0.4)
-        fig.tight_layout()
-        fig.savefig(plots_dir / "text_tokens_hist.png", dpi=200)
-        plt.close(fig)
-    else:
-        logging.warning(
-            "Δεν βρέθηκαν ζευγάρια text+abstract για histogram κειμένου."
-        )
-
-    if buckets.abstract_with_text_tokens:
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.hist(
-            buckets.abstract_with_text_tokens,
-            bins=hist_bins,
-            color="#f28e2b",
-            edgecolor="black",
-        )
-        ax.set_xlabel("Μήκος abstract (tokens) σε εγγραφές με text")
-        ax.set_ylabel("Συχνότητα")
-        ax.set_title("Κατανομή tokens για abstract")
-        ax.grid(axis="y", linestyle="--", alpha=0.4)
-        fig.tight_layout()
-        fig.savefig(plots_dir / "abstract_tokens_hist.png", dpi=200)
-        plt.close(fig)
-    else:
-        logging.warning(
-            "Δεν βρέθηκαν ζευγάρια text+abstract για histogram abstract."
-        )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Υπολογίζει στατιστικά μήκους tokens/χαρακτήρων με tokenizer Qwen."
+        description="Statistics for token counts in cleaned .jsonl dataset files.",
     )
     parser.add_argument(
-        "--data-dir",
-        default="data/jsonl",
-        type=Path,
-        help="Φάκελος με τα αρχεία *.jsonl.gz.",
+        "--input-dir", 
+        default=Path("__dataset__/cleaned"),
+        type=Path, 
+        help="Folder with *.jsonl files (e.g., 'cleaned')"
     )
     parser.add_argument(
-        "--glob",
-        default="*.jsonl.gz",
-        help="Pattern αρχείων (προεπιλογή: *.jsonl.gz).",
-    )
-    parser.add_argument(
-        "--tokenizer",
-        default="Qwen/Qwen2.5-7B",
-        help="Όνομα ή τοπικό path tokenizer από HuggingFace.",
-    )
-    parser.add_argument(
-        "--no-trust-remote-code",
-        action="store_true",
-        help="Απενεργοποιεί το trust_remote_code (αν δεν χρειάζεται).",
-    )
-    parser.add_argument(
-        "--add-special-tokens",
-        action="store_true",
-        help="Υπολογίζει μήκη συμπεριλαμβάνοντας ειδικά tokens BOS/EOS.",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Περιορισμός πλήθους εγγραφών ανά αρχείο για γρήγορο sampling.",
-    )
+        "--tokenizer", 
+        default="Qwen/Qwen1.5-1.8B",
+        help="Tokenizer name from HuggingFace (e.g., 'Qwen/Qwen1.5-1.8B')"
+        )
     parser.add_argument(
         "--output-json",
+        default=None,
         type=Path,
-        default=Path("stats/qwen_token_stats.json"),
-        help="Που θα αποθηκευτεί το JSON με τα συνοπτικά αποτελέσματα.",
+        help="Final JSON with the statistics",
     )
     parser.add_argument(
         "--plots-dir",
         type=Path,
-        default=Path("stats/plots"),
-        help="Φάκελος για αποθήκευση PNG γραφημάτων (default stats/plots).",
+        default=Path("__stats__/plots"),
+        help="Folder for the plots (2 files: text/abstract)",
     )
     parser.add_argument(
-        "--no-plots",
-        action="store_true",
-        help="Να μην δημιουργηθούν καθόλου γραφήματα.",
+        "--hist-bins", 
+        type=int, default=100, 
+        help="Bins for the histogram plots"
+     )
+    parser.add_argument(
+        "--add-special-tokens", 
+        action="store_true", 
+        help="Include CLS/SEP tokens during encoding"
     )
     parser.add_argument(
-        "--hist-bins",
-        type=int,
-        default=50,
-        help="Πλήθος bins για τα histograms tokens (default 50).",
+        "--trust-remote-code", 
+        action="store_true", 
+        help="Pass to AutoTokenizer (default: False)"
     )
     parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Ελάχιστο επίπεδο logging.",
+        "--log-level", 
+        default="INFO", 
+        help="Logging level (DEBUG, INFO, ...)"
     )
     return parser.parse_args()
 
 
-def configure_logging(level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
-
-
-def write_json(path: Path, data: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2, ensure_ascii=False)
-    logging.info("Αποθήκευση αποτελεσμάτων στο %s", path)
-
-
 def main() -> None:
     args = parse_args()
-    configure_logging(args.log_level)
 
-    logging.info("Εκκίνηση ανάλυσης στον φάκελο %s", args.data_dir)
-    result, buckets = run_analysis(
-        data_dir=args.data_dir,
-        glob_pattern=args.glob,
-        tokenizer_model=args.tokenizer,
-        trust_remote_code=not args.no_trust_remote_code,
-        add_special_tokens=args.add_special_tokens,
-        limit=args.limit,
+    if args.output_json is None:
+        tok = args.tokenizer.replace("/", "_")
+        args.output_json = Path(f"__stats__/{tok}_stats.json")
+
+    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(levelname)s: %(message)s")
+
+    input_dir: Path = args.input_dir
+    if not input_dir.exists() or not input_dir.is_dir():
+        raise SystemExit(f"The folder '{input_dir}' does not exist or is not a directory.")
+
+    jsonl_files = sorted(input_dir.glob("*.jsonl"))
+    if not jsonl_files:
+        raise SystemExit(f"No .jsonl files found in {input_dir}")
+    tokenizer = load_tokenizer(
+        args.tokenizer,
+        trust_remote_code=args.trust_remote_code,
+        placeholder_tokens=PLACEHOLDER_TOKENS,
     )
 
-    write_json(args.output_json, result)
+    per_file_entries = []
+    all_text_tokens: List[int] = []
+    all_abstract_tokens: List[int] = []
+    overall_placeholder_counts: Dict[str, int] = {token: 0 for token in PLACEHOLDER_TOKENS}
 
-    if not args.no_plots and args.plots_dir is not None:
-        logging.info("Δημιουργία γραφημάτων στο %s", args.plots_dir)
-        generate_plots(
-            plots_dir=args.plots_dir,
-            result=result,
-            buckets=buckets,
-            hist_bins=max(1, args.hist_bins),
+    for file_path in jsonl_files:
+        logging.info("Processing %s", file_path)
+        stats = compute_file_stats(file_path, tokenizer, args.add_special_tokens)
+        per_file_entries.append(
+            {
+                "file_name": stats.file_name,
+                "text_tokens": describe(stats.text_tokens),
+                "abstract_tokens": describe(stats.abstract_tokens),
+                "placeholder_counts": stats.placeholder_counts,
+            }
         )
+        all_text_tokens.extend(stats.text_tokens)
+        all_abstract_tokens.extend(stats.abstract_tokens)
+        for token, count in stats.placeholder_counts.items():
+            overall_placeholder_counts[token] += count
+
+    args.output_json.parent.mkdir(parents=True, exist_ok=True)
+    result = {
+        "tokenizer": args.tokenizer,
+        "add_special_tokens": args.add_special_tokens,
+        "file_count": len(per_file_entries),
+        "files": per_file_entries,
+        "overall": {
+            "text_tokens": describe(all_text_tokens),
+            "abstract_tokens": describe(all_abstract_tokens),
+            "placeholder_counts": overall_placeholder_counts,
+        },
+    }
+
+    with args.output_json.open("w", encoding="utf-8") as fp:
+        json.dump(result, fp, indent=2, ensure_ascii=False)
+        fp.write("\n")
+    logging.info("Saved JSON: %s", args.output_json)
+
+    plot_hist(all_text_tokens, "Text tokens distribution", args.plots_dir / "text_tokens.png", bins=args.hist_bins, color="tab:red")
+    plot_hist(all_abstract_tokens, "Abstract tokens distribution", args.plots_dir / "abstract_tokens.png",bins=args.hist_bins, color="tab:green")
+
 
 if __name__ == "__main__":
     main()

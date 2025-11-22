@@ -10,6 +10,7 @@ import html
 import argparse
 from bs4 import BeautifulSoup, NavigableString
 from unicodedata import normalize
+from tqdm import tqdm
 
 BASE_URL = "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_bulk/oa_comm/xml/"
 RAW_DIR  = "__dataset__/tar"     # save .tar.gz
@@ -827,6 +828,18 @@ def build_record(xml_bytes: bytes, kept_titles_set: set, count_error_log_path: s
     return {"pmcid": pmc ,"abstract": abstract, "text": text, "metadata": metadata}
 
 
+def download_with_progress(url: str, dest_path: str):
+    """Download a file while showing a tqdm progress bar."""
+    desc = f"Downloading {os.path.basename(dest_path)}"
+    with tqdm(unit="B", unit_scale=True, unit_divisor=1024, desc=desc, miniters=1) as progress_bar:
+        def reporthook(block_num, block_size, total_size):
+            if total_size > 0:
+                progress_bar.total = total_size
+            progress_bar.update(block_num * block_size - progress_bar.n)
+
+        urllib.request.urlretrieve(url, dest_path, reporthook=reporthook)
+
+
 def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
     """ Convert a .tar.gz of JATS XML files to a single .jsonl file.
     parsed = number of XML files parsed
@@ -850,9 +863,11 @@ def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
     all_kept_titles = set()
 
     with tarfile.open(tar_path, "r:gz") as tf, open(out_path, "w", encoding="utf-8") as fout:
-        for m in tf.getmembers():
-            if not m.isfile() or not (m.name or "").lower().endswith(".xml"):
-                continue
+        members = [
+            m for m in tf.getmembers()
+            if m.isfile() and (m.name or "").lower().endswith(".xml")
+        ]
+        for m in tqdm(members, desc=f"Parsing {base}", unit="xml"):
             f = tf.extractfile(m)
             if not f:
                 continue
@@ -945,7 +960,7 @@ def main():
         print(f"[download] {url}")
         tmp_path = tar_path + ".tmp"
         try:
-            urllib.request.urlretrieve(url, tmp_path)
+            download_with_progress(url, tmp_path)
             os.rename(tmp_path, tar_path)
         except Exception as e:
             print(f"[ERROR] Download failed: {e}", file=sys.stderr)
