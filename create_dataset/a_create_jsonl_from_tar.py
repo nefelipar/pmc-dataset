@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-# pip install beautifulsoup4 lxml nltk
 
 import os
 import re
 import sys
 import tarfile
 import urllib.request
-import gzip
 import json
 import html
 import argparse
@@ -14,9 +12,9 @@ from bs4 import BeautifulSoup, NavigableString
 from unicodedata import normalize
 
 BASE_URL = "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_bulk/oa_comm/xml/"
-RAW_DIR  = "data/tar"     # save .tar.gz
-OUT_DIR  = "data/jsonl"   # save .jsonl.gz
-LOG_DIR  = "data/logs"    # logs (e.g., missing abstracts)
+RAW_DIR  = "__dataset__/tar"     # save .tar.gz
+OUT_DIR  = "__dataset__/jsonl"   # save .jsonl
+LOG_DIR  = "__dataset__/logs"    # logs 
 
 # Containers we don't want any text from (drop completely)
 FORBIDDEN_CONTAINER_TAGS = {
@@ -50,7 +48,6 @@ def clean(s: str) -> str:
     # Don't leave space after opening brackets/quotes (e.g. "( text)" → "(text)")
     s = re.sub(r"([(\[\{«“‘])\s+", r"\1", s)
     
-
     # --- Normalization placeholders ---
     PLACEHOLDERS = ["CIT_REF","FIG_REF","TAB_REF","APP_REF","BOX_REF","SUP_REF"]
     SEP_WORDS = r"(?i:and\/or|and|or|&|\+)"
@@ -123,7 +120,6 @@ def clean(s: str) -> str:
     # 4. if followed by uppercase/punctuation, glue the token
     # e.g. "D_{3} KO" (without space), "[^{3} H]" -> "[^{3}H]"
     s = re.sub(r'([_^]\{[^}]+\})\s+(?=[A-Z\)\]\},\.;:!?])', r'\1', s)
-    # --- End Subscript/Superscript cleanup ---
 
     # whitespace cleanup again
     s = re.sub(r"\s{2,}", " ", s).strip()
@@ -132,13 +128,13 @@ def clean(s: str) -> str:
 
 
 def text_from(node) -> str:
-    # Extract clean text from a BeautifulSoup node
+    """Extract clean text from a BeautifulSoup node"""
     return clean(node.get_text(" ", strip=True))
 
 
 def _word_count_with_nltk(text: str):
     try:
-        from nltk.tokenize import wordpunct_tokenize  # type: ignore
+        from nltk.tokenize import wordpunct_tokenize 
         return len([t for t in wordpunct_tokenize(text) if t.strip()])
     except Exception:
         return None
@@ -157,12 +153,10 @@ def count_words(text: str) -> int:
     return len(re.findall(r"\S+", text, flags=re.UNICODE))
 
 
-
 def in_boundary_without_forbidden(tag, boundary_name: str) -> bool:
     """ 
     If boundary_name is provided, ensure the tag is inside that boundary and not
-    inside a forbidden container. If boundary_name is None/empty, only enforce
-    that it's not inside a forbidden container.
+    inside a forbidden container.
     """
     p = getattr(tag, "parent", None)
     boundary_name = (boundary_name or "").lower()
@@ -180,9 +174,8 @@ def in_boundary_without_forbidden(tag, boundary_name: str) -> bool:
 
 
 def is_in_ignored_section(tag) -> bool:
-    """Detect if a tag is inside sections we want to exclude from body text
-    (acknowledgments, references, bibliography, appendix, supplementary, etc.).
-    """
+    """ 3-step filtering to remove unwanted sections based on:
+    1) tag name, 2) section type attribute, 3) section title text."""
     IGNORE_SECTION_TITLES = re.compile(
     r"^(?:"
     # Core sections
@@ -257,7 +250,7 @@ def is_in_ignored_section(tag) -> bool:
     r")$",
     re.IGNORECASE
 )
-
+    
     IGNORE_SEC_TYPES = {"supplementary-material", "display-objects", "data-availability", "COI-statement"}
 
     node_to_check = tag
@@ -266,16 +259,16 @@ def is_in_ignored_section(tag) -> bool:
         if not name:
             node_to_check = getattr(node_to_check, "parent", None)
             continue
-
+        # 1 step: check based on tag name
         if name in {"ack", "app-group", "app", "bio", "bios" ,"author-notes", "notes", "trans-abstract" ,"ref-list", "glossary", "fn-group", "fn"}:  
             return True
+        # 2 step: check based on section type attributes
         if name == "sec":
-            # 1. Check for ignored section types
             sec_type = (node_to_check.get("sec-type") or "").lower()
             if sec_type in IGNORE_SEC_TYPES:
                 return True
 
-            # 2. Look for a title child to decide
+            # 3 step: check based on section title text
             t = node_to_check.find("title", recursive=False)
             if t:
                 title_text = clean(t.get_text(" ", strip=True))
@@ -285,8 +278,8 @@ def is_in_ignored_section(tag) -> bool:
     return False
 
 
-def remove_figures_and_tables(soup_or_tag):
-    """Remove figures and tables and their captions completely from the tree."""
+def remove_container_tags(soup_or_tag):
+    """Remove entire container tags that we don't want any text from."""
     for tname in FORBIDDEN_CONTAINER_TAGS:
         for el in soup_or_tag.find_all(tname):
             el.decompose()
@@ -294,40 +287,41 @@ def remove_figures_and_tables(soup_or_tag):
 
 def replace_citations_with_placeholder(soup_or_tag):
     """
-    Find all <xref> tags that are citations (ref-type=bibr or citation)
-    and replace them with the placeholder "[CIT_REF]".
-    This is more robust than regex-based removal.
+    Find all <xref> tags that are citations and replace them with the placeholder "[CIT_REF]".
     """
     CITATION_REFS = {"bibr", "citation", "ref"}
- 
     for xr in soup_or_tag.find_all("xref"):
         rt = (xr.get("ref-type") or "").lower()
         if rt in CITATION_REFS:
             xr.replace_with("[CIT_REF]")
 
+
 def replace_math_with_placeholder(soup_or_tag):
     """
-    Find all <inline-formula> and <disp-formula> tags
-    and replace them with the placeholder "[MATH]".
+    Find all math formulas tags and replace them with the placeholder "[MATH]".
     """
     MATH_TAGS = ["inline-formula", "disp-formula", "tex-math", "math"]
     for tag_name in MATH_TAGS:
         for math_el in soup_or_tag.find_all(tag_name):
             math_el.replace_with("[MATH]")
 
+
 def replace_code_with_placeholder(soup_or_tag):
     """
     Replace any <code> or <preformat> blocks with the placeholder "[CODE]".
-    This runs before inline markup conversion so inner content isn't processed.
     """
     for tag_name in ["code", "preformat"]:
         for el in soup_or_tag.find_all(tag_name):
             el.replace_with("[CODE]")
 
+
 def convert_inline_markup(soup_or_tag):
     """
-    Converts <sup>, <sub> to caret/underscore and unwraps <italic>/<bold> etc.,
-    so that spaces are not inserted by get_text.
+    Converts some inline markup to plain text with simple conventions:
+    - superscripts: ^{...}
+    - subscripts: _{...}    
+    - italics/bold -> plain text
+    - monospace -> `...` 
     """
     # superscripts: ^3
     for sup in soup_or_tag.find_all('sup'):
@@ -339,26 +333,20 @@ def convert_inline_markup(soup_or_tag):
         txt = sub.get_text("", strip=True)
         sub.replace_with(f"_{{{txt}}}")
 
-    # italics/bold/smallcaps -> plain text (or optionally add *…*)
-    for tag in soup_or_tag.find_all(['italic','i','em','bold','b','strong']):
+    # italics/bold -> plain text
+    for tag in soup_or_tag.find_all(['italic','bold']):
         tag.unwrap()
-
-    # smallcaps <sc> -> uppercase text
-    for sc in soup_or_tag.find_all('sc'):
-        sc.string = (sc.get_text("", strip=True) or "").upper()
-        sc.unwrap()
 
     # monospace -> `txt`
     for mono in soup_or_tag.find_all('monospace'):
         txt = mono.get_text("", strip=True)
         mono.replace_with(f"`{txt}`")
 
+
 def fix_glued_xrefs(soup_or_tag):
     """
-    - KEEPS content <xref> tags (e.g., fig, table).
-    - For kept tags, it fixes "glued panel letters" by merging them
-      (e.g., <xref>Fig 1</xref>A becomes <xref>Fig 1A</xref>)
-      to prevent "Fig 1 A" during text extraction.
+    Fix xref tags that have panel letters/ranges glued to them without spaces.
+    E.g., <xref ref-type="fig" rid="F1">Fig. 1</xref>A → <xref ref-type="fig" rid="F1">Fig. 1A</xref>
     """
     CONTENT_REFS = {"fig", "table", "table-fn", "app", "boxed-text", "supplementary-material"}
 
@@ -398,9 +386,10 @@ def fix_glued_xrefs(soup_or_tag):
                 # Remove merged part from the following string
                 ns.replace_with(remaining_text)
 
+
 def replace_content_refs_with_placeholders(soup_or_tag):
     """
-    Replace inline content xref tags (figures, tables, etc) with [FIG], [TAB], [APP], [BOX].
+    Replace inline content xref tags (figures, tables, etc) with placeholders.
     Assumes fix_glued_xrefs has already been applied to glue panel letters.
     """
     placeholder_map = {
@@ -445,11 +434,12 @@ def replace_content_refs_with_placeholders(soup_or_tag):
 
         xr.replace_with(placeholder)
 
+
 # ---------- JATS pickers ----------
 def _process_section_markdown(section_tag, level, kept_titles_set, blockquote_prefix: str = ""):
     """
     Recursive helper function to process a section (<sec>) and its children.
-    Handles nested <sec>, <p>, <list>, <caption> and <boxed-text>.
+    Handles nested <sec>, <p>, <list>, <caption> and <boxed-text> etc..
     Applies a `blockquote_prefix` (e.g., "> ") if inside a <boxed-text>.
     Returns a list of Markdown-formatted text blocks.
     """
@@ -457,7 +447,7 @@ def _process_section_markdown(section_tag, level, kept_titles_set, blockquote_pr
     # Process direct children to maintain order
     for child in section_tag.children:
         if isinstance(child, NavigableString):
-            continue  # Ignore strings that are just whitespace between tags
+            continue 
 
         tag_name = (child.name or "").lower()
 
@@ -475,7 +465,6 @@ def _process_section_markdown(section_tag, level, kept_titles_set, blockquote_pr
         # --- HANDLE paragraphs ---
         elif tag_name == 'p':
             # Check if this <p> tag contains other block-level elements (like <list>)
-            # This is technically invalid JATS, but common in real-world XML.
             block_children = child.find_all(['list', 'sec', 'boxed-text', 'p'], recursive=False)
             
             if not block_children:
@@ -505,7 +494,7 @@ def _process_section_markdown(section_tag, level, kept_titles_set, blockquote_pr
             is_ordered = "order" in list_type or "decimal" in list_type
             
             item_counter = 1
-            # A <list-item> can also contain <p> tags, so we must recurse!
+            # A <list-item> can also contain <p> tags, so we must recurse
             for item in child.find_all("list-item", recursive=False):
                 # We get the text by processing the *children* of the list-item
                 # This correctly handles <list-item><p>...</p></list-item>
@@ -634,7 +623,7 @@ def extract_body_with_markdown(soup, kept_titles_set):
         return ""
 
     # First, sanitize the structure within the body
-    remove_figures_and_tables(body)
+    remove_container_tags(body)
     replace_citations_with_placeholder(body)
     replace_math_with_placeholder(body)
     replace_code_with_placeholder(body)
@@ -650,7 +639,9 @@ def extract_body_with_markdown(soup, kept_titles_set):
 
 
 def extract_abstract(art):
-    """Only normal abstracts, no graphical/teaser/etc; handles structured abstracts."""
+    """
+    Extracts the main technical abstract from the article.
+    """
     
     def pick_normal_abstract(art):
         """
@@ -669,9 +660,8 @@ def extract_abstract(art):
         for a in cands:
             a_type = (a.get("abstract-type") or "").lower()
             if a_type in WANTED:
-                return a # Found the best case, return it
-
-        return None  # No suitable abstract found
+                return a 
+        return None 
     
     abs_el = pick_normal_abstract(art)
     if not abs_el:
@@ -686,7 +676,7 @@ def extract_abstract(art):
             top_title.decompose()
 
     # sanitize abstract structure
-    remove_figures_and_tables(abs_el)
+    remove_container_tags(abs_el)
     replace_citations_with_placeholder(abs_el)
     replace_math_with_placeholder(abs_el)
     replace_code_with_placeholder(abs_el)
@@ -694,7 +684,7 @@ def extract_abstract(art):
     replace_content_refs_with_placeholders(abs_el)
     convert_inline_markup(abs_el)
     dummy_title_set = set()
-    all_blocks = _process_section_markdown(abs_el, 1, dummy_title_set)
+    all_blocks = _process_section_markdown(abs_el, 0, dummy_title_set)
     return "\n\n".join(all_blocks)
 
 
@@ -718,26 +708,39 @@ def extract_authors(art):
 
 
 def get_article_meta(soup):
+    """Get the <article-meta> tag from the soup."""
     front = soup.find("front")
     return front.find("article-meta") if front else None
 
 def get_article_type(soup) -> str:
+    """Get the article-type attribute from the <article> tag."""
     art = soup.find("article")
     return ((art.get("article-type") or "") if art else "").strip().lower()
 
 def get_journal_meta(soup):
+    """Get the <journal-meta> tag from the soup."""
     front = soup.find("front")
     return front.find("journal-meta") if front else None    
 
 def article_id(art, kind: str):
-    """ Take article-id of given kind (pmcid, pmid, doi) """
+    """ Extracts an article-id of a given kind from <article-meta>."""
     if not art: return None
     el = art.find("article-id", attrs={"pub-id-type": kind})
     return clean(el.get_text()) if el else None
 
 
 def extract_metadata(soup):
-    """metadata: pmid, doi, article_title, journal_title, epub, authors[]"""
+    """ Extracts metadata from the article.
+    Returns (pmcid, metadata_dict)
+    where metadata_dict contains:
+    - pmid
+    - doi
+    - article_title
+    - journal_title
+    - epub (epub date in YYYY[-MM[-DD]] format)
+    - authors (list)
+    - article_type
+    """
     art = get_article_meta(soup); 
     jmeta = get_journal_meta(soup)
     
@@ -777,8 +780,8 @@ def extract_metadata(soup):
 def build_record(xml_bytes: bytes, kept_titles_set: set, count_error_log_path: str = None):
     """
     Creates a JSON record where:
-    - "abstract": contains the abstract in plain text.
-    - "text": contains ONLY the main body with its titles in Markdown.
+    - "abstract": contains the abstract in plain text (structured if available).
+    - "text": contains the main body with all the changes we made as Markdown.
     - "metadata": contains all metadata.
     """
     soup = BeautifulSoup(xml_bytes, "lxml-xml")
@@ -825,16 +828,16 @@ def build_record(xml_bytes: bytes, kept_titles_set: set, count_error_log_path: s
 
 
 def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
-    """ Convert a .tar.gz of JATS XML files to a single .jsonl.gz file.
+    """ Convert a .tar.gz of JATS XML files to a single .jsonl file.
     parsed = number of XML files parsed
     kept   = number of JSON records written
-    skipped= number of XML files skipped (no pmc or errors)
+    skipped= number of XML files skipped due to errors
     """
     base = os.path.basename(tar_path)
     prefix = os.path.splitext(os.path.splitext(base)[0])[0]  # drop .tar(.gz)
     
     # Use specified output directory and log directory 
-    out_path = os.path.join(out_dir, f"{prefix}.jsonl.gz") 
+    out_path = os.path.join(out_dir, f"{prefix}.jsonl") 
     
     # Create log subdirectory for this tarball
     tar_log_dir = os.path.join(log_dir, prefix)
@@ -846,7 +849,7 @@ def tar_to_jsonl(tar_path: str, out_dir: str, log_dir: str) -> str:
     parsed = kept = skipped = 0
     all_kept_titles = set()
 
-    with tarfile.open(tar_path, "r:gz") as tf, gzip.open(out_path, "wt", encoding="utf-8") as fout:
+    with tarfile.open(tar_path, "r:gz") as tf, open(out_path, "w", encoding="utf-8") as fout:
         for m in tf.getmembers():
             if not m.isfile() or not (m.name or "").lower().endswith(".xml"):
                 continue
@@ -887,14 +890,11 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    # --- Required Arguments ---
     parser.add_argument(
         "source",
         type=str,
         help="The .tar.gz file name (e.g., oa_comm_xml.PMC012xxxxxx.tar.gz) or the full URL to download it."
     )
-
-    # --- Optional Arguments for Directories---
     parser.add_argument(
         "--raw_dir",
         type=str,
@@ -905,7 +905,7 @@ def main():
         "--out_dir",
         type=str,
         default=OUT_DIR,
-        help="Directory to save output .jsonl.gz files."
+        help="Directory to save output .jsonl files."
     )
     parser.add_argument(
         "--log_dir",
@@ -913,14 +913,11 @@ def main():
         default=LOG_DIR,
         help="Directory to save log files."
     )
-
-    # --- Optional Flags ---
     parser.add_argument(
         "-f", "--force-download",
         action="store_true",
         help="Force re-download of the tarball even if it exists locally."
     )
-
     args = parser.parse_args()
 
     # --- Setup Directories ---
@@ -933,6 +930,7 @@ def main():
     tar_name = os.path.basename(arg)
     tar_path = os.path.join(args.raw_dir, tar_name)
 
+    print(f"[info] Step 1: Create jsonl from JATS XML tarball")
     should_download = True
     if os.path.exists(tar_path) and not args.force_download:
         print(f"[skip] already exists: {tar_path}")
@@ -965,12 +963,14 @@ def main():
             print(f"[WARN] Could not remove tar file {tar_path}: {e}", file=sys.stderr)
         try:
             os.rmdir(args.raw_dir)
-            print(f"[cleanup] removed empty directory {args.raw_dir}")
+            print(f"[total cleanup] removed empty directory {args.raw_dir}")
         except OSError:
             pass
     else:
         print(f"[ERROR] Tar file not found at: {tar_path}", file=sys.stderr)
         sys.exit(1)
+    print(f"----------------------------------------------")
+
 
 if __name__ == "__main__":
     main()
