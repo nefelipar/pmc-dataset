@@ -153,13 +153,23 @@ def update_placeholder_counts(container: Dict[str, int], text: str) -> None:
         container[token] += text.count(token)
 
 
+def count_lines(path: Path) -> int:
+    """Return the number of lines in a file so tqdm can show progress."""
+    with path.open("rb") as handle:
+        return sum(1 for _ in handle)
+
+
 def compute_file_stats(path: Path, tokenizer, add_special_tokens: bool) -> FileStats:
     """Compute token statistics for a single .jsonl file."""
+    total_lines = count_lines(path)
     text_counts: List[int] = []
     abstract_counts: List[int] = []
     placeholder_totals: Dict[str, int] = {token: 0 for token in PLACEHOLDER_TOKENS}
     with path.open("r", encoding="utf-8") as handle:
-        for idx, raw_line in enumerate(tqdm(handle, desc=path.name, unit="line", leave=False), 1):
+        for idx, raw_line in enumerate(
+            tqdm(handle, desc=path.name, unit="line", leave=False, total=total_lines),
+            1,
+        ):
             line = raw_line.strip()
             if not line:
                 continue
