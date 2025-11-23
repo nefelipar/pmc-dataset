@@ -166,10 +166,7 @@ def compute_file_stats(path: Path, tokenizer, add_special_tokens: bool) -> FileS
     abstract_counts: List[int] = []
     placeholder_totals: Dict[str, int] = {token: 0 for token in PLACEHOLDER_TOKENS}
     with path.open("r", encoding="utf-8") as handle:
-        for idx, raw_line in enumerate(
-            tqdm(handle, desc=path.name, unit="line", leave=False, total=total_lines),
-            1,
-        ):
+        for idx, raw_line in enumerate(tqdm(handle, desc=path.name, unit="line", leave=False, total=total_lines),1):
             line = raw_line.strip()
             if not line:
                 continue
