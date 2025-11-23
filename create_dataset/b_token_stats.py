@@ -16,6 +16,7 @@ from pathlib import Path
 from statistics import median
 from typing import Dict, Iterable, List, Optional
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 
 PLACEHOLDER_TOKENS = [
@@ -158,7 +159,7 @@ def compute_file_stats(path: Path, tokenizer, add_special_tokens: bool) -> FileS
     abstract_counts: List[int] = []
     placeholder_totals: Dict[str, int] = {token: 0 for token in PLACEHOLDER_TOKENS}
     with path.open("r", encoding="utf-8") as handle:
-        for idx, raw_line in enumerate(handle, 1):
+        for idx, raw_line in enumerate(tqdm(handle, desc=path.name, unit="line", leave=False), 1):
             line = raw_line.strip()
             if not line:
                 continue
@@ -267,7 +268,7 @@ def main() -> None:
     all_abstract_tokens: List[int] = []
     overall_placeholder_counts: Dict[str, int] = {token: 0 for token in PLACEHOLDER_TOKENS}
 
-    for file_path in jsonl_files:
+    for file_path in tqdm(jsonl_files, desc="Files", unit="file"):
         logging.info("Processing %s", file_path)
         stats = compute_file_stats(file_path, tokenizer, args.add_special_tokens)
         per_file_entries.append(
