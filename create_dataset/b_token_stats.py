@@ -1,8 +1,26 @@
 #!/usr/bin/env python3
-"""
-Find and report token statistics of the .jsonl files of the jsonl folder (dataset). More specifically, it computes
-token counts for the "text" and "abstract" fields of each record, and generates summary statistics
-and histograms. It has as a default tokenizer the Qwen1.5-1.8B model, but any HuggingFace tokenizer can be used.
+"""Compute token statistics for .jsonl dataset files using a HuggingFace tokenizer.
+This script operates in two stages:
+
+1. Per-record statistics:
+   - For each input *.jsonl file, it reads every line as a JSON record.
+   - It cleans and tokenizes the "text" and "abstract" fields and records the
+     token counts per record.
+   - It counts occurrences of predefined placeholder tokens (e.g. [MATH], [CODE],
+     [CIT_REF]) within each record.
+   - These per-record statistics are written to __stats__/<tokenizer>/stats_per_record/
+     as one JSONL file per input *.jsonl file.
+
+2. Per-file summary statistics:
+   - For each *.jsonl file, it aggregates the per-record token counts into
+     descriptive statistics (count, min, max, mean, median, p90, p95, p99) for
+     both "text" and "abstract" token lengths.
+   - It also aggregates total placeholder counts across all records in the file.
+   - These summary statistics are written to __stats__/<tokenizer>/stats_per_tar/
+     as one JSON summary file per input *.jsonl file.
+
+The tokenizer treats the special placeholder tokens as single tokens by adding them to
+its vocabulary if they are not already present.
 """
 
 from __future__ import annotations
@@ -14,7 +32,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, TextIO
 from tqdm import tqdm
 
 
@@ -31,7 +49,7 @@ PLACEHOLDER_TOKENS = [
 
 
 def load_tokenizer(name: str, trust_remote_code: bool = True, placeholder_tokens: Optional[List[str]] = None):
-    """ Load a HuggingFace tokenizer by name safely, with optional placeholder tokens added."""
+    """ Load a HuggingFace tokenizer by name."""
     try:
         from transformers import AutoTokenizer  
     except ImportError as exc: 
@@ -137,7 +155,7 @@ def count_lines(path: Path) -> int:
         return sum(1 for _ in handle)
 
 
-def compute_file_stats(path: Path, tokenizer, add_special_tokens: bool) -> FileStats:
+def compute_file_stats(path: Path, tokenizer, add_special_tokens: bool, record_fp: Optional[TextIO] = None) -> FileStats:
     """Compute token statistics for a single .jsonl file."""
     total_lines = count_lines(path)
     text_counts: List[int] = []
@@ -154,15 +172,38 @@ def compute_file_stats(path: Path, tokenizer, add_special_tokens: bool) -> FileS
                 logging.warning("Skip of record %s:%d - bad JSON (%s)", path.name, idx, exc)
                 continue
 
+            text_token_count: Optional[int] = None
+            abstract_token_count: Optional[int] = None
+            per_record_placeholders: Dict[str, int] = {token: 0 for token in PLACEHOLDER_TOKENS}
+
             text_value = clean_text(record.get("text"))
             if text_value is not None:
-                text_counts.append(len(tokenizer.encode(text_value, add_special_tokens=add_special_tokens)))
+                text_token_count = len(tokenizer.encode(text_value, add_special_tokens=add_special_tokens))
+                text_counts.append(text_token_count)
                 update_placeholder_counts(placeholder_totals, text_value)
+                update_placeholder_counts(per_record_placeholders, text_value)
 
             abstract_value = clean_text(record.get("abstract"))
             if abstract_value is not None:
-                abstract_counts.append(len(tokenizer.encode(abstract_value, add_special_tokens=add_special_tokens)))
+                abstract_token_count = len(tokenizer.encode(abstract_value, add_special_tokens=add_special_tokens))
+                abstract_counts.append(abstract_token_count)
                 update_placeholder_counts(placeholder_totals, abstract_value)
+                update_placeholder_counts(per_record_placeholders, abstract_value)
+
+            if record_fp is not None:
+                record_fp.write(
+                    json.dumps(
+                        {
+                            "pmcid": record.get("pmcid"),
+                            "file_name": path.name,
+                            "text_tokens": text_token_count,
+                            "abstract_tokens": abstract_token_count,
+                            "placeholders": per_record_placeholders,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
 
     return FileStats(
         file_name=path.name,
@@ -183,16 +224,16 @@ def parse_args() -> argparse.Namespace:
         help="Folder with *.jsonl files (default: __dataset__/jsonl)."
     )
     parser.add_argument(
+        "--files",
+        nargs="+",
+        type=Path,
+        help="Optional list of specific *.jsonl files to process. Relative paths are resolved under --input-dir.",
+    )
+    parser.add_argument(
         "--tokenizer", 
         default="Qwen/Qwen1.5-1.8B",
         help="Tokenizer name from HuggingFace (e.g., 'Qwen/Qwen1.5-1.8B')"
         )
-    parser.add_argument(
-        "--output-json",
-        default=None,
-        type=Path,
-        help="Final JSON with the statistics (default: __stats__/<tokenizer>/stats.json)",
-    )
     parser.add_argument(
         "--add-special-tokens", 
         action="store_true", 
@@ -216,8 +257,10 @@ def main() -> None:
 
     tok = args.tokenizer.replace("/", "_")
     tokenizer_dir = Path("__stats__") / tok
-    if args.output_json is None:
-        args.output_json = tokenizer_dir / "stats.json"
+    records_dir = tokenizer_dir / "stats_per_record"
+    stats_per_tar_dir = tokenizer_dir / "stats_per_tar"
+    records_dir.mkdir(parents=True, exist_ok=True)
+    stats_per_tar_dir.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(levelname)s: %(message)s")
 
@@ -226,7 +269,19 @@ def main() -> None:
     if not input_dir.exists() or not input_dir.is_dir():
         raise SystemExit(f"The folder '{input_dir}' does not exist or is not a directory.")
 
-    jsonl_files = sorted(input_dir.glob("*.jsonl"))
+    if args.files:
+        jsonl_files = []
+        for path_arg in args.files:
+            candidate = path_arg if path_arg.is_absolute() else input_dir / path_arg
+            if not candidate.exists():
+                raise SystemExit(f"Requested file not found: {candidate}")
+            if candidate.is_dir():
+                raise SystemExit(f"Requested path is a directory, not a file: {candidate}")
+            jsonl_files.append(candidate)
+        jsonl_files = sorted(set(jsonl_files))
+    else:
+        jsonl_files = sorted(input_dir.glob("*.jsonl"))
+
     if not jsonl_files:
         raise SystemExit(f"No .jsonl files found in {input_dir}")
     tokenizer = load_tokenizer(
@@ -235,44 +290,22 @@ def main() -> None:
         placeholder_tokens=PLACEHOLDER_TOKENS,
     )
 
-    per_file_entries = []
-    all_text_tokens: List[int] = []
-    all_abstract_tokens: List[int] = []
-    overall_placeholder_counts: Dict[str, int] = {token: 0 for token in PLACEHOLDER_TOKENS}
-
     for file_path in tqdm(jsonl_files, desc="Files", unit="file"):
         logging.info("Processing %s", file_path)
-        stats = compute_file_stats(file_path, tokenizer, args.add_special_tokens)
-        per_file_entries.append(
-            {
-                "file_name": stats.file_name,
-                "text_tokens": describe(stats.text_tokens),
-                "abstract_tokens": describe(stats.abstract_tokens),
-                "placeholder_counts": stats.placeholder_counts,
-            }
-        )
-        all_text_tokens.extend(stats.text_tokens)
-        all_abstract_tokens.extend(stats.abstract_tokens)
-        for token, count in stats.placeholder_counts.items():
-            overall_placeholder_counts[token] += count
-
-    args.output_json.parent.mkdir(parents=True, exist_ok=True)
-    result = {
-        "tokenizer": args.tokenizer,
-        "add_special_tokens": args.add_special_tokens,
-        "file_count": len(per_file_entries),
-        "files": per_file_entries,
-        "overall": {
-            "text_tokens": describe(all_text_tokens),
-            "abstract_tokens": describe(all_abstract_tokens),
-            "placeholder_counts": overall_placeholder_counts,
-        },
-    }
-
-    with args.output_json.open("w", encoding="utf-8") as fp:
-        json.dump(result, fp, indent=2, ensure_ascii=False)
-        fp.write("\n")
-    logging.info("Saved JSON: %s", args.output_json)
+        record_path = records_dir / file_path.name
+        with record_path.open("w", encoding="utf-8") as record_fp:
+            stats = compute_file_stats(file_path, tokenizer, args.add_special_tokens, record_fp=record_fp)
+        file_summary = {
+            "file_name": stats.file_name,
+            "text_tokens": describe(stats.text_tokens),
+            "abstract_tokens": describe(stats.abstract_tokens),
+            "placeholder_counts": stats.placeholder_counts,
+        }
+        summary_path = stats_per_tar_dir / f"{file_path.stem}.json"
+        with summary_path.open("w", encoding="utf-8") as fp:
+            json.dump(file_summary, fp, indent=2, ensure_ascii=False)
+            fp.write("\n")
+        logging.info("Saved summary JSON: %s", summary_path)
 
 if __name__ == "__main__":
     main()
