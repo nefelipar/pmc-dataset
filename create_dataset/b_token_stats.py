@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
 from typing import Dict, Iterable, List, Optional
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 
@@ -109,27 +108,6 @@ def describe(values: List[int]) -> Dict[str, Optional[float]]:
         "p99": percentile(sorted_vals, 0.99)
     }
 
-
-def plot_hist(values: List[int], title: str, output_path: Path, bins: int = 100, color: str = "tab:blue") -> None:
-    """Plot a histogram of the given values and save it to the specified path."""
-    if plt is None: 
-        raise SystemExit("The matplotlib library was not found. Install it with ``pip install matplotlib`` to generate plots.")
-    if not values:
-        logging.warning("No values to plot for '%s'", title)
-        return
-    plt.figure(figsize=(10, 6))
-    plt.hist(values, bins=bins, color=color, alpha=0.75, edgecolor="black")
-    plt.title(title)
-    plt.xlabel("Number of tokens")
-    plt.ylabel("Number of records")
-    plt.grid(True, axis="y", alpha=0.3)
-    plt.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output_path)
-    plt.close()
-    logging.info("Saved plot: %s", output_path)
-
-
 def clean_text(value) -> Optional[str]:
     if isinstance(value, str):
         cleaned = value.strip()
@@ -216,17 +194,6 @@ def parse_args() -> argparse.Namespace:
         help="Final JSON with the statistics (default: __stats__/<tokenizer>/stats.json)",
     )
     parser.add_argument(
-        "--plots-dir",
-        type=Path,
-        default=None,
-        help="Folder for the plots (default: __stats__/<tokenizer>/)",
-    )
-    parser.add_argument(
-        "--hist-bins", 
-        type=int, default=100, 
-        help="Bins for the histogram plots"
-     )
-    parser.add_argument(
         "--add-special-tokens", 
         action="store_true", 
         help="Include CLS/SEP tokens during encoding"
@@ -251,8 +218,6 @@ def main() -> None:
     tokenizer_dir = Path("__stats__") / tok
     if args.output_json is None:
         args.output_json = tokenizer_dir / "stats.json"
-    if args.plots_dir is None:
-        args.plots_dir = tokenizer_dir
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(levelname)s: %(message)s")
 
@@ -308,10 +273,6 @@ def main() -> None:
         json.dump(result, fp, indent=2, ensure_ascii=False)
         fp.write("\n")
     logging.info("Saved JSON: %s", args.output_json)
-
-    plot_hist(all_text_tokens, "Text tokens distribution", args.plots_dir / "text_tokens.png", bins=args.hist_bins, color="tab:red")
-    plot_hist(all_abstract_tokens, "Abstract tokens distribution", args.plots_dir / "abstract_tokens.png",bins=args.hist_bins, color="tab:green")
-
 
 if __name__ == "__main__":
     main()
