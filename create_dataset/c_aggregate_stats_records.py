@@ -56,9 +56,16 @@ def describe(values: List[int]) -> Dict[str, Optional[float]]:
             "max": None,
             "mean": None,
             "median": None,
+            "p01": None,
+            "p05": None,
+            "p10": None,
+            "p15": None,
+            "p20": None,
+            "p80": None,
+            "p85": None,
             "p90": None,
             "p95": None,
-            "p99": None,
+            "p99": None
         }
 
     sorted_vals = sorted(values)
@@ -68,6 +75,13 @@ def describe(values: List[int]) -> Dict[str, Optional[float]]:
         "max": float(sorted_vals[-1]),
         "mean": safe_mean(sorted_vals),
         "median": float(median(sorted_vals)),
+        "p01": percentile(sorted_vals, 0.01),
+        "p05": percentile(sorted_vals, 0.05),
+        "p10": percentile(sorted_vals, 0.10),
+        "p15": percentile(sorted_vals, 0.15),
+        "p20": percentile(sorted_vals, 0.20),
+        "p80": percentile(sorted_vals, 0.80),
+        "p85": percentile(sorted_vals, 0.85),
         "p90": percentile(sorted_vals, 0.90),
         "p95": percentile(sorted_vals, 0.95),
         "p99": percentile(sorted_vals, 0.99),
