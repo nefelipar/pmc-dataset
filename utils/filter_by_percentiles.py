@@ -9,24 +9,37 @@ from pathlib import Path
 from typing import Dict, Tuple
 
 
-def load_overall_percentiles(overall_path: Path, p_low_key: str, p_high_key: str) -> Tuple[float, float]:
-    """Read overall.json and return (low, high) percentile values for text_tokens."""
+def load_overall_percentiles(
+    overall_path: Path, p_low_key: str, p_high_key: str
+) -> Tuple[float, float, float, float]:
+    """Read overall.json and return (text_low, text_high, abs_low, abs_high) percentiles."""
     try:
         overall = json.loads(overall_path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise SystemExit(f"Failed to read overall stats from {overall_path}: {exc}") from exc
 
     text_stats = overall.get("text_tokens") or {}
-    if p_low_key not in text_stats or p_high_key not in text_stats:
-        raise SystemExit(
-            f"Missing percentiles {p_low_key}/{p_high_key} in text_tokens at {overall_path}"
-        )
-    return float(text_stats[p_low_key]), float(text_stats[p_high_key])
+    abstract_stats = overall.get("abstract_tokens") or {}
+    missing = []
+    for key in (p_low_key, p_high_key):
+        if key not in text_stats:
+            missing.append(f"text_tokens.{key}")
+        if key not in abstract_stats:
+            missing.append(f"abstract_tokens.{key}")
+    if missing:
+        raise SystemExit(f"Missing percentiles in overall.json: {', '.join(missing)}")
+
+    return (
+        float(text_stats[p_low_key]),
+        float(text_stats[p_high_key]),
+        float(abstract_stats[p_low_key]),
+        float(abstract_stats[p_high_key]),
+    )
 
 
-def load_text_tokens(stats_path: Path) -> Dict[str, float]:
-    """Return {pmcid: text_tokens} from a stats_per_record JSONL file."""
-    tokens: Dict[str, float] = {}
+def load_token_pairs(stats_path: Path) -> Dict[str, Tuple[float, float]]:
+    """Return {pmcid: (text_tokens, abstract_tokens)} from a stats_per_record JSONL file."""
+    tokens: Dict[str, Tuple[float, float]] = {}
     with stats_path.open("r", encoding="utf-8") as fh:
         for line_no, line in enumerate(fh, 1):
             line = line.strip()
@@ -39,8 +52,13 @@ def load_text_tokens(stats_path: Path) -> Dict[str, float]:
                 continue
             pmcid = obj.get("pmcid")
             t_tok = obj.get("text_tokens")
-            if isinstance(pmcid, str) and isinstance(t_tok, (int, float)):
-                tokens[pmcid] = float(t_tok)
+            a_tok = obj.get("abstract_tokens")
+            if (
+                isinstance(pmcid, str)
+                and isinstance(t_tok, (int, float))
+                and isinstance(a_tok, (int, float))
+            ):
+                tokens[pmcid] = (float(t_tok), float(a_tok))
     return tokens
 
 
@@ -62,10 +80,12 @@ def filter_file(
     out_path: Path,
     token_low: float,
     token_high: float,
+    token_low_abs: float,
+    token_high_abs: float,
     article_type: str,
 ) -> Tuple[int, int]:
     """Filter a single dataset JSONL file and write the kept records."""
-    token_map = load_text_tokens(stats_path)
+    token_map = load_token_pairs(stats_path)
     kept = 0
     total = 0
 
@@ -85,12 +105,13 @@ def filter_file(
                 continue
 
             pmcid = rec.get("pmcid")
-            tokens = token_map.get(pmcid)
-            if tokens is None:
+            token_pair = token_map.get(pmcid)
+            if token_pair is None:
                 continue
+            text_tokens, abstract_tokens = token_pair
             if not article_type_matches(rec.get("metadata"), article_type):
                 continue
-            if token_low <= tokens <= token_high:
+            if token_low <= text_tokens <= token_high and token_low_abs <= abstract_tokens <= token_high_abs:
                 out_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 kept += 1
     return kept, total
@@ -100,7 +121,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Keep only records with article_type=='research-article' whose text_tokens "
-            "lie between the chosen percentiles from overall.json."
+            "AND abstract_tokens lie between the chosen percentiles from overall.json."
         )
     )
     parser.add_argument(
@@ -130,12 +151,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--p-low",
         default="p10",
-        help="Lower percentile key from overall.json text_tokens (e.g., p10).",
+        help="Lower percentile key from overall.json (applied to both text_tokens and abstract_tokens).",
     )
     parser.add_argument(
         "--p-high",
         default="p80",
-        help="Upper percentile key from overall.json text_tokens (e.g., p80).",
+        help="Upper percentile key from overall.json (applied to both text_tokens and abstract_tokens).",
     )
     parser.add_argument(
         "--article-type",
@@ -147,7 +168,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    token_low, token_high = load_overall_percentiles(args.overall, args.p_low, args.p_high)
+    (
+        token_low,
+        token_high,
+        token_low_abs,
+        token_high_abs,
+    ) = load_overall_percentiles(args.overall, args.p_low, args.p_high)
 
     dataset_files = sorted(args.dataset_dir.glob("*.jsonl"))
     if not dataset_files:
@@ -167,13 +193,15 @@ def main() -> None:
             out_path,
             token_low,
             token_high,
+            token_low_abs,
+            token_high_abs,
             args.article_type,
         )
         total_records += total
         total_kept += kept
         print(
             f"{data_path.name}: kept {kept}/{total} records "
-            f"(text_tokens in [{token_low}, {token_high}])"
+            f"(text_tokens in [{token_low}, {token_high}], abstract_tokens in [{token_low_abs}, {token_high_abs}])"
         )
 
     print(f"\nDone. Kept {total_kept} of {total_records} records across {len(dataset_files)} files.")
